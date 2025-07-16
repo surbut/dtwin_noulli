@@ -266,6 +266,201 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         Override parent method to use matched controls instead of random sampling
         """
         return self.compare_treated_vs_matched_controls(window)
+    
+    def plot_learned_patterns_with_matched_controls(self):
+        """
+        Plot learned patterns using matched controls instead of random sampling
+        """
+        if not hasattr(self, 'matched_control_indices') or self.matched_control_indices is None:
+            print("Warning: No matched controls available, falling back to original method")
+            return self.plot_learned_patterns()
+        
+        # Get treated patterns (pre-treatment signatures)
+        treated_patterns = self.treatment_patterns['pre_treatment_signatures']
+        
+        # Get matched control patterns at the same time points
+        control_patterns = []
+        for ctrl_idx in self.matched_control_indices:
+            try:
+                # Use the same time window as treated patients (12 months before treatment)
+                # For controls, we'll use a similar age-based time point
+                ctrl_eid = self.processed_ids[ctrl_idx]
+                
+                # Try to get age from covariate_dicts if available
+                if hasattr(self, 'covariate_dicts') and self.covariate_dicts is not None:
+                    age_at_enroll = self.covariate_dicts.get('age_at_enroll', {}).get(int(ctrl_eid))
+                else:
+                    # Fallback to covariates DataFrame
+                    try:
+                        age_at_enroll = self.covariates[self.covariates['eid'] == ctrl_eid]['age_at_enroll'].iloc[0]
+                    except:
+                        age_at_enroll = None
+                
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    t0 = int(age_at_enroll - 30)  # Convert to time index
+                    if t0 >= 12 and t0 < self.signatures.shape[2] - 12:
+                        pattern = self.signatures[ctrl_idx, :, t0-12:t0]
+                        if pattern.shape == (self.signatures.shape[1], 12):
+                            control_patterns.append(pattern)
+            except Exception as e:
+                continue
+        
+        if len(control_patterns) == 0:
+            print("Warning: No valid control patterns found, using original method")
+            return self.plot_learned_patterns()
+        
+        control_patterns = np.array(control_patterns)
+        
+        # Create the same plots but with matched controls
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle('Learned Treatment Patterns from Observational Data (Matched Controls)', fontsize=16)
+        
+        # Plot 1: Pre-treatment signature clusters (same as original)
+        self._plot_pre_treatment_clusters(axes[0, 0])
+        
+        # Plot 2: Most predictive signatures (using matched controls)
+        self._plot_most_predictive_signatures_matched(axes[0, 1], treated_patterns, control_patterns)
+        
+        # Plot 3: Signature differences (using matched controls)
+        self._plot_signature_differences_matched(axes[0, 2], treated_patterns, control_patterns)
+        
+        # Plot 4: Treatment initiation ages (same as original)
+        self._plot_treatment_initiation_ages(axes[1, 0])
+        
+        # Plot 5: Concerning trends (same as original)
+        self._plot_concerning_trends(axes[1, 1])
+        
+        # Plot 6: Early vs late treatment (same as original)
+        self._plot_early_vs_late_treatment(axes[1, 2])
+        
+        plt.tight_layout()
+        return fig
+    
+    def _plot_pre_treatment_clusters(self, ax):
+        """Plot pre-treatment signature clusters"""
+        cluster_analysis = self.discover_treatment_initiation_patterns()
+        if cluster_analysis is None:
+            ax.text(0.5, 0.5, 'No cluster data available', ha='center', va='center', transform=ax.transAxes)
+            return
+            
+        n_clusters = cluster_analysis['n_clusters']
+        colors = plt.cm.Set1(np.linspace(0, 1, n_clusters))
+        
+        for c in range(n_clusters):
+            pattern = cluster_analysis['cluster_patterns'][c]
+            n_patients = pattern['n_patients']
+            mean_age = pattern['mean_treatment_age']
+            
+            # Plot average signature for top signature
+            top_sig = pattern['signature_pattern'][0, :]  # First signature
+            ax.plot(range(-12, 0), top_sig, color=colors[c], linewidth=2,
+                    label=f'Cluster {c} (n={n_patients}, age={mean_age:.1f})')
+        
+        ax.set_xlabel('Months Before Treatment')
+        ax.set_ylabel('Signature Loading')
+        ax.set_title('Pre-Treatment Signature Clusters')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    def _plot_treatment_initiation_ages(self, ax):
+        """Plot treatment initiation age distribution"""
+        treatment_ages = np.array(self.treatment_patterns['treatment_times']) + self.time_start_age
+        ax.hist(treatment_ages, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+        ax.set_xlabel('Age at Treatment Initiation')
+        ax.set_ylabel('Number of Patients')
+        ax.set_title('Observed Treatment Initiation Ages')
+        ax.grid(True, alpha=0.3)
+    
+    def _plot_concerning_trends(self, ax):
+        """Plot concerning trends before treatment"""
+        responsive_patterns = self.learn_treatment_responsive_patterns()
+        if responsive_patterns is None:
+            ax.text(0.5, 0.5, 'No trend data available', ha='center', va='center', transform=ax.transAxes)
+            return
+            
+        concerning = responsive_patterns['concerning_patterns']
+        signatures = list(concerning.keys())[:8]
+        trend_fractions = [concerning[s]['concerning_trend_fraction'] for s in signatures]
+        
+        ax.bar(range(len(signatures)), trend_fractions, alpha=0.7, color='orange')
+        ax.set_xticks(range(len(signatures)))
+        ax.set_xticklabels([f'Sig {s}' for s in signatures])
+        ax.set_ylabel('Fraction with Upward Trend')
+        ax.set_title('Concerning Trends Before Treatment')
+        ax.grid(True, alpha=0.3)
+    
+    def _plot_early_vs_late_treatment(self, ax):
+        """Plot early vs late treatment comparison"""
+        responsive_patterns = self.learn_treatment_responsive_patterns()
+        if responsive_patterns is None:
+            ax.text(0.5, 0.5, 'No early/late data available', ha='center', va='center', transform=ax.transAxes)
+            return
+            
+        early_late = responsive_patterns['early_vs_late']['signature_differences']
+        sig_diffs = early_late[:6]  # First 6 signatures
+        
+        differences = [d['difference'] for d in sig_diffs]
+        p_values = [d['p_value'] for d in sig_diffs]
+        signatures = [d['signature'] for d in sig_diffs]
+        
+        colors = ['green' if p < 0.05 else 'gray' for p in p_values]
+        ax.bar(range(len(signatures)), differences, color=colors, alpha=0.7)
+        ax.set_xticks(range(len(signatures)))
+        ax.set_xticklabels([f'Sig {s}' for s in signatures])
+        ax.set_ylabel('Difference (Early - Late Treaters)')
+        ax.set_title('Early vs Late Treatment Signatures')
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        ax.grid(True, alpha=0.3)
+    
+    def _plot_most_predictive_signatures_matched(self, ax, treated_patterns, control_patterns):
+        """Plot most predictive signatures using matched controls"""
+        # Calculate treatment readiness scores using matched controls
+        n_signatures = treated_patterns.shape[1]
+        readiness_scores = []
+        
+        for sig_idx in range(n_signatures):
+            treated_levels = treated_patterns[:, sig_idx, -1]  # Final levels
+            control_levels = control_patterns[:, sig_idx, -1]  # Final levels
+            
+            # Calculate separation score (higher = more predictive)
+            if len(treated_levels) > 0 and len(control_levels) > 0:
+                separation = abs(np.mean(treated_levels) - np.mean(control_levels)) / np.std(np.concatenate([treated_levels, control_levels]))
+                readiness_scores.append(separation)
+            else:
+                readiness_scores.append(0)
+        
+        # Get top 5 signatures
+        top_indices = np.argsort(readiness_scores)[::-1][:5]
+        top_scores = [readiness_scores[i] for i in top_indices]
+        
+        ax.bar(range(len(top_indices)), top_scores, color='skyblue')
+        ax.set_xlabel('Signature')
+        ax.set_ylabel('Treatment Readiness Score')
+        ax.set_title('Most Predictive Signatures (Matched Controls)')
+        ax.set_xticks(range(len(top_indices)))
+        ax.set_xticklabels([f'Sig {i}' for i in top_indices])
+        ax.grid(True, alpha=0.3)
+    
+    def _plot_signature_differences_matched(self, ax, treated_patterns, control_patterns):
+        """Plot signature differences using matched controls"""
+        n_signatures = min(treated_patterns.shape[1], control_patterns.shape[1])
+        differences = []
+        
+        for sig_idx in range(n_signatures):
+            treated_mean = np.mean(treated_patterns[:, sig_idx, -1])
+            control_mean = np.mean(control_patterns[:, sig_idx, -1])
+            diff = treated_mean - control_mean
+            differences.append(diff)
+        
+        colors = ['red' if d > 0 else 'blue' for d in differences]
+        ax.bar(range(n_signatures), differences, color=colors, alpha=0.7)
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        ax.set_xlabel('Signature')
+        ax.set_ylabel('Difference (Treated - Matched Controls)')
+        ax.set_title('Signature Differences: Treated vs Matched Controls')
+        ax.set_xticks(range(n_signatures))
+        ax.set_xticklabels([f'Sig {i}' for i in range(n_signatures)])
+        ax.grid(True, alpha=0.3)
 
 def bayesian_map_propensity_response(treated_signatures, control_signatures, outcomes=None):
     """
@@ -497,6 +692,9 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
         matched_control_indices=matched_control_indices, gp_scripts=gp_scripts
     )
     
+    # Pass covariate_dicts to the enhanced learner for proper age access
+    enhanced_learner.covariate_dicts = covariate_dicts
+    
     # Learn patterns
     cluster_analysis = enhanced_learner.discover_treatment_initiation_patterns()
     responsive_patterns = enhanced_learner.learn_treatment_responsive_patterns()
@@ -512,14 +710,19 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     # Extract signature patterns for matched cohorts
     treated_patterns = enhanced_learner.treatment_patterns['pre_treatment_signatures']
     
-    # Extract control patterns
+    # Extract control patterns using proper time points (not random)
     control_patterns = []
     for ctrl_idx in matched_control_indices:
         try:
-            sample_time = np.random.randint(12, min(40, signature_loadings.shape[2] - 12))
-            pattern = signature_loadings[ctrl_idx, :, sample_time-12:sample_time]
-            if pattern.shape == (signature_loadings.shape[1], 12):
-                control_patterns.append(pattern)
+            # Get the actual time point for this matched control
+            ctrl_eid = processed_ids[ctrl_idx]
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(ctrl_eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                t0 = int(age_at_enroll - 30)  # Convert to time index
+                if t0 >= 12 and t0 < signature_loadings.shape[2] - 12:
+                    pattern = signature_loadings[ctrl_idx, :, t0-12:t0]
+                    if pattern.shape == (signature_loadings.shape[1], 12):
+                        control_patterns.append(pattern)
         except:
             continue
     
@@ -536,9 +739,15 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
         print(f"   MAP optimization had issues")
         map_results = None
     
-    # Step 6: Visualization
-    print("\n6. Creating visualizations...")
-    fig = enhanced_learner.plot_learned_patterns()
+    # Step 6: Visualization with matched controls
+    print("\n6. Creating visualizations with matched controls...")
+    
+    # Override the plotting to use matched controls
+    enhanced_learner.matched_control_indices = matched_control_indices
+    enhanced_learner.matched_treated_indices = matched_treated_indices
+    
+    # Create custom plotting that uses matched controls
+    fig = enhanced_learner.plot_learned_patterns_with_matched_controls()
     
     # Compile results
     results = {
