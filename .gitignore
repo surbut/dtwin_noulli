@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+cov.csv
+true_statins.csv
+prescription_patient_ids.npy

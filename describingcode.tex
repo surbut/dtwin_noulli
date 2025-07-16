@@ -1,0 +1,220 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+
+\title{Understanding Uncertainty}
+\author{sarahmurbut }
+\date{February 2021}
+
+\begin{document}
+
+\maketitle
+
+
+
+\section{Observational Treatment Pattern Analysis}
+
+This analysis learns treatment patterns from real-world clinical decisions by examining biomarker
+signature trajectories in the months before patients actually received treatment, without requiring
+ground truth about optimal timing.
+
+\subsection{Step 2: Pre-treatment Signature Clustering}
+
+The clustering identifies distinct patterns of biomarker evolution that lead to treatment initiation,
+revealing different "pathways" to treatment.
+
+The clustering algorithm uses K-means on engineered features extracted from pre-treatment signature trajectories:
+
+\subsubsection{Feature Engineering}
+For each patient $i$ and signature $k$, we extract features from their 12-month pre-treatment trajectory $\mathbf{s}_{i,k} = [s_{i,k}(t-12), \ldots, s_{i,k}(t-1)]$:
+
+\begin{equation}
+\mathbf{f}_{i,k} = [\text{trend}_k, \text{acceleration}_k, \text{recent\_level}_k, \text{early\_level}_k, \text{max\_level}_k, \text{volatility}_k, \text{total\_change}_k, \text{max\_change}_k]
+\end{equation}
+
+where:
+\begin{itemize}
+\item $\text{trend}_k = \text{slope}(\mathbf{s}_{i,k})$ (linear trend)
+\item $\text{acceleration}_k = \text{quadratic coefficient}(\mathbf{s}_{i,k})$ (curvature)
+\item $\text{recent\_level}_k = \frac{1}{3}\sum_{t=-3}^{-1} s_{i,k}(t)$ (last 3 months)
+\item $\text{early\_level}_k = \frac{1}{3}\sum_{t=-12}^{-10} s_{i,k}(t)$ (first 3 months)
+\item $\text{volatility}_k = \text{std}(\mathbf{s}_{i,k})$
+\item $\text{total\_change}_k = s_{i,k}(-1) - s_{i,k}(-12)$
+\end{itemize}
+
+\subsubsection{K-means Clustering}
+We minimize the within-cluster sum of squares:
+\begin{equation}
+\min_{\{\mathbf{c}_1, \ldots, \mathbf{c}_K\}} \sum_{i=1}^N \min_{k} \|\mathbf{f}_i - \mathbf{c}_k\|^2
+\end{equation}
+
+where $\mathbf{f}_i = [\mathbf{f}_{i,1}, \ldots, \mathbf{f}_{i,K}]$ is the concatenated feature vector for patient $i$.
+
+\subsection{Step 3: Signature Prediction Analysis}
+
+This step uses statistical testing to identify signatures that predict treatment timing:
+
+\subsubsection{Early vs Late Treatment Analysis}
+We split treated patients into early ($E$) and late ($L$) groups based on median treatment age.
+
+For each signature $k$, we test:
+\begin{align}
+H_0: \mu_{E,k} &= \mu_{L,k} \\
+H_1: \mu_{E,k} &\neq \mu_{L,k}
+\end{align}
+
+using the t-statistic:
+\begin{equation}
+t_k = \frac{\bar{s}_{E,k} - \bar{s}_{L,k}}{\sqrt{\frac{s^2_{E,k}}{n_E} + \frac{s^2_{L,k}}{n_L}}}
+\end{equation}
+
+where $\bar{s}_{E,k}$ is the mean final pre-treatment level of signature $k$ in early treaters.
+
+\subsubsection{Concerning Trends Analysis}
+For each signature $k$, we calculate the fraction of patients with upward (worsening) trends:
+\begin{equation}
+p_k = \frac{1}{N} \sum_{i=1}^N \mathbb{I}[\text{trend}_{i,k} > 0]
+\end{equation}
+
+where $\text{trend}_{i,k} = \text{slope}(\mathbf{s}_{i,k})$.
+
+High values of $p_k$ indicate biomarkers that consistently worsen before treatment initiation.
+
+\subsection{Step 5: Treatment Readiness Prediction Model}
+
+This step has two components: (1) ranking signatures by treatment readiness, and (2) building a
+predictive model.
+
+\subsubsection{Treatment Readiness Scoring}
+First, we rank signatures by how well they indicate treatment readiness using:
+\begin{equation}
+\text{readiness\_score}_k = \frac{1}{3}(p_k + \text{accel\_fraction}_k + \max(0, 1 -
+\text{trend\_std}_k))
+\end{equation}
+
+where:
+\begin{itemize}
+\item $p_k$ = fraction of patients with upward trends in signature $k$
+\item $\text{accel\_fraction}_k$ = fraction showing positive acceleration
+\item $\text{trend\_std}_k$ = standard deviation of trends (lower = more consistent)
+\end{itemize}
+
+This identifies which biomarker signatures most reliably indicate treatment need.
+
+\subsubsection{Random Forest Classifier}
+Second, we build a Random Forest classifier to predict treatment readiness for new patients.
+
+\textbf{Feature Extraction:}
+For a signature pattern $\mathbf{S} = [\mathbf{s}_1, \ldots, \mathbf{s}_K]$, we extract features:
+\begin{equation}
+\mathbf{x} = [\text{trend}_1, \text{level}_1, \text{level\_vs\_typical}_1, \text{accel}_1, \ldots,
+\text{trend}_K, \text{level}_K, \text{level\_vs\_typical}_K, \text{accel}_K]
+\end{equation}
+
+where:
+\begin{itemize}
+\item $\text{trend}_k = \text{slope}(\mathbf{s}_k)$ (trajectory slope)
+\item $\text{level}_k = s_k(-1)$ (final pre-treatment level)
+\item $\text{level\_vs\_typical}_k = s_k(-1) - \mu_{\text{treated},k}$ (vs typical treated patient)
+\item $\text{accel}_k = \text{quadratic coefficient}(\mathbf{s}_k)$ (acceleration)
+\end{itemize}
+
+\textbf{Training Data:}
+\begin{itemize}
+\item \textbf{Positive examples} (y=1): Pre-treatment patterns from patients who actually received
+treatment
+\item \textbf{Negative examples} (y=0): Random patterns from never-treated patients
+\end{itemize}
+
+\textbf{Model:}
+\begin{equation}
+f(\mathbf{x}) = \frac{1}{B} \sum_{b=1}^B f_b(\mathbf{x})
+\end{equation}
+
+where each tree $f_b$ predicts:
+\begin{equation}
+f_b(\mathbf{x}) = \begin{cases} 
+1 & \text{if treatment indicated} \\
+0 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+\subsubsection{Cross-validation AUC}
+\begin{equation}
+\text{AUC} = \frac{1}{|\mathcal{P}| \cdot |\mathcal{N}|} \sum_{i \in \mathcal{P}} \sum_{j \in \mathcal{N}} \mathbb{I}[f(\mathbf{x}_i) > f(\mathbf{x}_j)]
+\end{equation}
+
+where $\mathcal{P}$ and $\mathcal{N}$ are positive and negative examples.
+
+\subsection{Enhanced Pipeline with Covariate Matching}
+
+To address potential confounding by age and other covariates, the analysis can be enhanced with a preliminary matching step:
+
+\subsubsection{Step 1: Covariate Matching}
+Before pattern learning, we perform 1:1 nearest neighbor matching between treated and control patients:
+
+\begin{enumerate}
+\item \textbf{Build feature vectors} for treated and control patients at their respective time points
+\item \textbf{Standardize features} to ensure equal weighting
+\item \textbf{Match} each treated patient to the nearest control using:
+\begin{equation}
+\text{match}(i) = \arg\min_{j \in \text{controls}} \|\mathbf{x}_i - \mathbf{x}_j\|_2
+\end{equation}
+where $\mathbf{x}_i$ includes age, baseline signatures, and other covariates
+\end{enumerate}
+
+This creates matched cohorts that control for confounders like natural aging of biomarker signatures.
+
+\subsubsection{Enhanced Pipeline Summary}
+\begin{enumerate}
+\item \textbf{Match} treated to control patients: $\{(i, \text{match}(i))\}$
+\item \textbf{Extract} pre-treatment trajectories from matched cohorts: $\{\mathbf{s}_{i,k}\}_{i=1}^N$
+\item \textbf{Engineer} features: $\{\mathbf{f}_i\}_{i=1}^N$
+\item \textbf{Cluster} patients: $\{c_i\}_{i=1}^N$ where $c_i \in \{1,\ldots,K\}$
+\item \textbf{Test} signature differences using matched controls: $\{p_k, t_k\}_{k=1}^K$
+\item \textbf{Train} prediction model: $f: \mathbb{R}^{4K} \rightarrow [0,1]$
+\end{enumerate}
+
+This enhanced pipeline provides both \textbf{descriptive clusters} (what patterns exist) and \textbf{predictive models} (who will get treated) while controlling for potential confounders through rigorous matching.
+
+\subsection{Step 6: Bayesian Propensity-Response Model}
+
+For advanced causal inference, we implement a two-stage Bayesian model that separates propensity (who gets treated) from response (who benefits from treatment):
+
+\subsubsection{Stage 1: Propensity Model}
+Models treatment assignment based on signature patterns:
+\begin{align}
+\boldsymbol{\beta}_p &\sim \mathcal{N}(\mathbf{0}, \mathbf{I}) \\
+\alpha_p &\sim \mathcal{N}(0, 1) \\
+\text{logit}(p_i) &= \alpha_p + \mathbf{s}_i^T \boldsymbol{\beta}_p \\
+T_i &\sim \text{Bernoulli}(p_i)
+\end{align}
+
+where $p_i$ is the propensity score and $T_i$ is treatment assignment.
+
+\subsubsection{Stage 2: Response Model}
+Models outcomes conditional on treatment and signatures:
+\begin{align}
+\boldsymbol{\beta}_r &\sim \mathcal{N}(\mathbf{0}, \mathbf{I}) \\
+\alpha_r &\sim \mathcal{N}(0, 1) \\
+\tau &\sim \mathcal{N}(0, 1) \\
+\text{logit}(q_i) &= \alpha_r + \mathbf{s}_i^T \boldsymbol{\beta}_r + T_i \tau \\
+Y_i &\sim \text{Bernoulli}(q_i)
+\end{align}
+
+where $q_i$ is response probability, $\tau$ is the treatment effect, and $Y_i$ is the outcome.
+
+\subsubsection{Model Interpretation}
+\begin{itemize}
+\item $\boldsymbol{\beta}_p$: Which signatures predict treatment assignment (clinical decision-making)
+\item $\boldsymbol{\beta}_r$: Which signatures predict outcomes (biological response)
+\item $\tau$: Average treatment effect
+\item Discrepancies between $\boldsymbol{\beta}_p$ and $\boldsymbol{\beta}_r$ reveal confounding by indication
+\end{itemize}
+
+\subsection{Key Clinical Insight}
+This approach reveals \textbf{confounding by indication}: signatures that predict treatment assignment
+may differ from those that predict treatment benefit. The observational patterns inform who gets
+treated, while subsequent causal analysis determines who should get treated.
+
+\end{document}

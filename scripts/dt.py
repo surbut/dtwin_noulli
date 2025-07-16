@@ -9,10 +9,6 @@ from sklearn.neighbors import NearestNeighbors
 random.seed(42)
 np.random.seed(42)
 
-disease_names_df = pd.read_csv("disease_names.csv")
-disease_names_list = disease_names_df.iloc[:, 1].tolist()
-disease_names = disease_names_list
-
 @st.cache_data
 def run_digital_twin_matching(
     treated_time_idx,

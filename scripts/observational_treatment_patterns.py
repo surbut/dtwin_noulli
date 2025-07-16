@@ -8,8 +8,15 @@ from sklearn.metrics import roc_auc_score
 import seaborn as sns
 from scipy.stats import ttest_ind, mannwhitneyu
 from sklearn.ensemble import RandomForestRegressor
-import pymc as pm
-import arviz as az
+try:
+    import pymc as pm
+    import arviz as az
+    PYMC_AVAILABLE = True
+except (ImportError, AttributeError, KeyError) as e:
+    print(f"Warning: PyMC not available ({type(e).__name__}). Bayesian functions will be skipped.")
+    pm = None
+    az = None
+    PYMC_AVAILABLE = False
 
 class ObservationalTreatmentPatternLearner:
     """
@@ -17,12 +24,13 @@ class ObservationalTreatmentPatternLearner:
     """
     
     def __init__(self, signature_loadings, processed_ids, statin_prescriptions, 
-                 covariates, time_grid_start_age=30):
+                 covariates, time_grid_start_age=30, gp_scripts=None):
         self.signatures = signature_loadings  # N x K x T
         self.processed_ids = processed_ids
         self.prescriptions = statin_prescriptions
         self.covariates = covariates
         self.time_start_age = time_grid_start_age
+        self.gp_scripts = gp_scripts
         
         # Process prescription data to find treatment initiation times
         self.treatment_patterns = self._extract_treatment_patterns()
@@ -49,7 +57,13 @@ class ObservationalTreatmentPatternLearner:
                         .min()
                         .reset_index())
         
-        for eid in self.processed_ids:
+        # Only consider patients who have prescription data (if gp_scripts provided)
+        if self.gp_scripts is not None:
+            patients_to_check = set(self.gp_scripts['eid'].unique()).intersection(set(self.processed_ids))
+        else:
+            patients_to_check = self.processed_ids
+        
+        for eid in patients_to_check:
             try:
                 patient_idx = np.where(self.processed_ids == eid)[0][0]
                 
@@ -1134,6 +1148,10 @@ def bayesian_propensity_response_model(signature_trajectories, treatment_status,
     """
     Two-stage model: signatures → propensity → response
     """
+    if not PYMC_AVAILABLE:
+        print("PyMC not available. Skipping Bayesian analysis.")
+        return None, None
+        
     n_patients, n_signatures = signature_trajectories.shape
     
     with pm.Model() as model:
