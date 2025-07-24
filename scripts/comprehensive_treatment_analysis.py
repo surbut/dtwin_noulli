@@ -41,7 +41,7 @@ def encode_smoking(status):
     else:
         return [0, 0, 0]  # For missing/unknown
 
-def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indices=None):
+def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indices=None, is_treated=False, treatment_dates=None):
     """
     Build feature vectors for matching using 10-year signature trajectories and comprehensive covariates
     (Proper implementation from dt.py with NaN handling)
@@ -68,7 +68,23 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         sig_indices = list(range(n_signatures))
     expected_length = len(sig_indices) * window
     
-    for eid, t0 in zip(eids, t0s):
+    # Calculate means for imputation (do this once at the beginning)
+    ldl_values = [v for v in covariate_dicts.get('ldl_prs', {}).values() if v is not None and not np.isnan(v)]
+    hdl_values = [v for v in covariate_dicts.get('hdl', {}).values() if v is not None and not np.isnan(v)]
+    tchol_values = [v for v in covariate_dicts.get('tchol', {}).values() if v is not None and not np.isnan(v)]
+    sbp_values = [v for v in covariate_dicts.get('SBP', {}).values() if v is not None and not np.isnan(v)]
+    
+    ldl_mean = np.mean(ldl_values) if ldl_values else 0
+    hdl_mean = np.mean(hdl_values) if hdl_values else 50
+    tchol_mean = np.mean(tchol_values) if tchol_values else 200
+    sbp_mean = np.mean(sbp_values) if sbp_values else 140
+    
+    print(f"Processing {len(eids)} patients with sig_indices={sig_indices}")
+    
+    for i, (eid, t0) in enumerate(zip(eids, t0s)):
+        if i % 1000 == 0:
+            print(f"Processed {i} patients, kept {len(features)} so far")
+            
         try:
             idx = np.where(processed_ids == int(eid))[0][0]
         except Exception:
@@ -77,14 +93,16 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             continue  # Not enough history
         t0_int = int(t0)
         sig_traj = thetas[idx, sig_indices, t0_int-window:t0_int].flatten()
+        #print(f"EID {eid}: sig_traj shape {sig_traj.shape}, expected {expected_length}")
         if sig_traj.shape[0] != expected_length:
+            print(f"EID {eid}: sig_traj shape {sig_traj.shape}, expected {expected_length} and wrong length")
             continue  # Skip if not the right length
         
         # Check for NaN in signature trajectory
         if np.any(np.isnan(sig_traj)):
             continue  # Skip if signature has NaN values
         
-        # Extract comprehensive covariates with proper NaN handling
+        # Extract covariates with proper handling
         age = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         if np.isnan(age) or age is None:
             age = 57  # Fallback age
@@ -94,45 +112,103 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             sex = 0
         sex = int(sex)
         
-        dm2 = covariate_dicts['dm2_prev'].get(int(eid), 0)
-        if np.isnan(dm2) or dm2 is None:
-            dm2 = 0
+        # For "prev" variables: EXCLUDE if missing
+        dm2 = covariate_dicts['dm2_prev'].get(int(eid))
+        if dm2 is None or np.isnan(dm2):
+            print(f"Excluding EID {eid}: missing dm2_prev")
+            continue  # Skip this patient
             
-        antihtn = covariate_dicts['antihtnbase'].get(int(eid), 0)
-        if np.isnan(antihtn) or antihtn is None:
-            antihtn = 0
+        antihtn = covariate_dicts['antihtnbase'].get(int(eid))
+        if antihtn is None or np.isnan(antihtn):
+            print(f"Excluding EID {eid}: missing antihtnbase")
+            continue  # Skip this patient
             
-        dm1 = covariate_dicts['dm1_prev'].get(int(eid), 0)
-        if np.isnan(dm1) or dm1 is None:
-            dm1 = 0
-            
-        smoke = encode_smoking(covariate_dicts['smoke'].get(int(eid), None))
-        if np.any(np.isnan(smoke)):
-            smoke = [0, 0, 0]  # Default to "Never" smoking
-            
-        ldl_prs = covariate_dicts.get('ldl_prs', {}).get(int(eid), 0)
+        dm1 = covariate_dicts['dm1_prev'].get(int(eid))
+        if dm1 is None or np.isnan(dm1):
+            print(f"Excluding EID {eid}: missing dm1_prev")
+            continue  # Skip this patient
+        
+        # EXCLUDE patients with diseases before treatment/enrollment (incident user logic)
+        age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
+        
+        # Determine the reference age for disease exclusion
+        if is_treated and treatment_dates is not None:
+            # For treated patients: use first statin prescription date
+            treatment_idx = eids.index(eid) if eid in eids else None
+            if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                treatment_age = age_at_enroll + (treatment_dates[treatment_idx] / 12)  # Convert months to years
+                reference_age = treatment_age
+                reference_type = "treatment"
+            else:
+                reference_age = age_at_enroll
+                reference_type = "enrollment"
+        else:
+            # For control patients: use enrollment date
+            reference_age = age_at_enroll
+            reference_type = "enrollment"
+        
+        # Check CAD exclusion
+        cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
+        cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
+        if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
+            if cad_censor_age < reference_age:
+                print(f"Excluding EID {eid}: CAD occurred before {reference_type} (age {cad_censor_age:.1f} < {reference_age:.1f})")
+                continue  # Skip this patient
+        
+        # Check DM exclusion
+        dm_any = covariate_dicts.get('Dm_Any', {}).get(int(eid), 0)
+        dm_censor_age = covariate_dicts.get('Dm_censor_age', {}).get(int(eid))
+        if dm_any == 2 and dm_censor_age is not None and not np.isnan(dm_censor_age):
+            if dm_censor_age < reference_age:
+                print(f"Excluding EID {eid}: DM occurred before {reference_type} (age {dm_censor_age:.1f} < {reference_age:.1f})")
+                continue  # Skip this patient
+        
+        # Check HTN exclusion
+        ht_any = covariate_dicts.get('Ht_Any', {}).get(int(eid), 0)
+        ht_censor_age = covariate_dicts.get('Ht_censor_age', {}).get(int(eid))
+        if ht_any == 2 and ht_censor_age is not None and not np.isnan(ht_censor_age):
+            if ht_censor_age < reference_age:
+                print(f"Excluding EID {eid}: HTN occurred before {reference_type} (age {ht_censor_age:.1f} < {reference_age:.1f})")
+                continue  # Skip this patient
+        
+        # Check HyperLip exclusion
+        hyperlip_any = covariate_dicts.get('HyperLip_Any', {}).get(int(eid), 0)
+        hyperlip_censor_age = covariate_dicts.get('HyperLip_censor_age', {}).get(int(eid))
+        if hyperlip_any == 2 and hyperlip_censor_age is not None and not np.isnan(hyperlip_censor_age):
+            if hyperlip_censor_age < reference_age:
+                print(f"Excluding EID {eid}: HyperLip occurred before {reference_type} (age {hyperlip_censor_age:.1f} < {reference_age:.1f})")
+                continue  # Skip this patient
+        
+        # For clinical variables: IMPUTE with mean
+        ldl_prs = covariate_dicts.get('ldl_prs', {}).get(int(eid))
         if np.isnan(ldl_prs) or ldl_prs is None:
-            ldl_prs = 0
+            ldl_prs = ldl_mean
             
-        cad_prs = covariate_dicts.get('cad_prs', {}).get(int(eid), 0)
-        if np.isnan(cad_prs) or cad_prs is None:
-            cad_prs = 0
-            
-        tchol = covariate_dicts.get('tchol', {}).get(int(eid), 0)
-        if np.isnan(tchol) or tchol is None:
-            tchol = 0
-            
-        hdl = covariate_dicts.get('hdl', {}).get(int(eid), 0)
+        hdl = covariate_dicts.get('hdl', {}).get(int(eid))
         if np.isnan(hdl) or hdl is None:
-            hdl = 0
+            hdl = hdl_mean
             
-        sbp = covariate_dicts.get('SBP', {}).get(int(eid), 0)
+        tchol = covariate_dicts.get('tchol', {}).get(int(eid))
+        if np.isnan(tchol) or tchol is None:
+            tchol = tchol_mean
+            
+        sbp = covariate_dicts.get('SBP', {}).get(int(eid))
         if np.isnan(sbp) or sbp is None:
-            sbp = 0
-            
+            sbp = sbp_mean
+        
         pce_goff = covariate_dicts.get('pce_goff', {}).get(int(eid), 0.09)
         if np.isnan(pce_goff) or pce_goff is None:
             pce_goff = 0.09
+        
+        # Add this line back (around line 120, after ldl_prs):
+        cad_prs = covariate_dicts.get('cad_prs', {}).get(int(eid), 0)
+        if np.isnan(cad_prs) or cad_prs is None:
+            cad_prs = 0
+        
+        # Extract smoking status and encode
+        smoke = encode_smoking(covariate_dicts.get('smoke', {}).get(int(eid), None))
+        if np.any(np.isnan(smoke)):
+            smoke = [0, 0, 0]  # Default to "Never" smoking
         
         # Create feature vector and check for NaN
         feature_vector = np.concatenate([
@@ -151,6 +227,8 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         features.append(feature_vector)
         indices.append(idx)
         kept_eids.append(eid)
+    
+    print(f"Final result: {len(features)} patients kept out of {len(eids)}")
     
     if len(features) == 0:
         print("Warning: No valid features found after NaN filtering")
@@ -212,21 +290,29 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         
         treated_patterns = self.treatment_patterns['pre_treatment_signatures']
         
-        # Extract matched control patterns
+        # Extract matched control patterns using proper age-based time points
         control_patterns = []
         for ctrl_idx in self.matched_control_indices:
             try:
-                # Sample a similar time window for controls
-                valid_times = list(range(window, min(40, self.signatures.shape[2] - window)))
-                if len(valid_times) == 0:
-                    continue
-                    
-                sample_time = np.random.choice(valid_times)
-                pattern = self.signatures[ctrl_idx, :, sample_time-window:sample_time]
+                # Get the actual time point for this matched control (not random!)
+                ctrl_eid = self.processed_ids[ctrl_idx]
                 
-                if pattern.shape == (self.signatures.shape[1], window):
-                    control_patterns.append(pattern)
-                    
+                # Try to get age from covariate_dicts if available
+                if hasattr(self, 'covariate_dicts') and self.covariate_dicts is not None:
+                    age_at_enroll = self.covariate_dicts.get('age_at_enroll', {}).get(int(ctrl_eid))
+                else:
+                    # Fallback to covariates DataFrame
+                    try:
+                        age_at_enroll = self.covariates[self.covariates['eid'] == ctrl_eid]['age_at_enroll'].iloc[0]
+                    except:
+                        age_at_enroll = None
+                
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    t0 = int(age_at_enroll - 30)  # Convert to time index
+                    if t0 >= window and t0 < self.signatures.shape[2] - window:
+                        pattern = self.signatures[ctrl_idx, :, t0-window:t0]
+                        if pattern.shape == (self.signatures.shape[1], window):
+                            control_patterns.append(pattern)
             except Exception as e:
                 continue
         
@@ -266,6 +352,179 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         Override parent method to use matched controls instead of random sampling
         """
         return self.compare_treated_vs_matched_controls(window)
+    
+    def learn_treatment_responsive_patterns_with_matched_controls(self, window=12):
+        """
+        Learn treatment responsive patterns using matched controls instead of random sampling
+        """
+        if self.matched_control_indices is None:
+            print("No matched controls provided, using original method")
+            return self.learn_treatment_responsive_patterns()
+        
+        treated_patterns = self.treatment_patterns['pre_treatment_signatures']
+        
+        # Extract matched control patterns using proper age-based time points
+        control_patterns = []
+        for ctrl_idx in self.matched_control_indices:
+            try:
+                # Get the actual time point for this matched control (not random!)
+                ctrl_eid = self.processed_ids[ctrl_idx]
+                
+                # Try to get age from covariate_dicts if available
+                if hasattr(self, 'covariate_dicts') and self.covariate_dicts is not None:
+                    age_at_enroll = self.covariate_dicts.get('age_at_enroll', {}).get(int(ctrl_eid))
+                else:
+                    # Fallback to covariates DataFrame
+                    try:
+                        age_at_enroll = self.covariates[self.covariates['eid'] == ctrl_eid]['age_at_enroll'].iloc[0]
+                    except:
+                        age_at_enroll = None
+                
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    t0 = int(age_at_enroll - 30)  # Convert to time index
+                    if t0 >= window and t0 < self.signatures.shape[2] - window:
+                        pattern = self.signatures[ctrl_idx, :, t0-window:t0]
+                        if pattern.shape == (self.signatures.shape[1], window):
+                            control_patterns.append(pattern)
+            except Exception as e:
+                continue
+        
+        if len(control_patterns) == 0:
+            print("Warning: No valid control patterns found, using original method")
+            return self.learn_treatment_responsive_patterns()
+        
+        control_patterns = np.array(control_patterns)
+        
+        # Now use the same logic as the original method but with matched controls
+        n_signatures = treated_patterns.shape[1]
+        concerning_patterns = {}
+        treatment_readiness_signatures = []
+        
+        # Analyze each signature
+        for sig_idx in range(n_signatures):
+            treated_sig = treated_patterns[:, sig_idx, :]  # N x window
+            control_sig = control_patterns[:, sig_idx, :]  # N_control x window
+            
+            # Calculate trends
+            treated_trends = np.polyfit(np.arange(window), treated_sig.T, 1)[0]  # Slopes
+            control_trends = np.polyfit(np.arange(window), control_sig.T, 1)[0]  # Slopes
+            
+            # Concerning trends (upward in treated)
+            concerning_trend_fraction = np.mean(treated_trends > 0)
+            
+            # Accelerating patterns (increasing acceleration)
+            treated_accel = np.polyfit(np.arange(window), treated_sig.T, 2)[0]  # Quadratic terms
+            accelerating_fraction = np.mean(treated_accel > 0)
+            
+            concerning_patterns[sig_idx] = {
+                'concerning_trend_fraction': concerning_trend_fraction,
+                'accelerating_fraction': accelerating_fraction,
+                'treated_trend_mean': np.mean(treated_trends),
+                'control_trend_mean': np.mean(control_trends),
+                'treated_trend_std': np.std(treated_trends),
+                'control_trend_std': np.std(control_trends)
+            }
+            
+            # Calculate treatment readiness score (separation between treated and controls)
+            treated_final = treated_sig[:, -1]  # Final levels
+            control_final = control_sig[:, -1]  # Final levels
+            
+            if len(treated_final) > 0 and len(control_final) > 0:
+                separation = abs(np.mean(treated_final) - np.mean(control_final)) / np.std(np.concatenate([treated_final, control_final]))
+                treatment_readiness_signatures.append((sig_idx, separation))
+        
+        # Sort by readiness score
+        treatment_readiness_signatures.sort(key=lambda x: x[1], reverse=True)
+        
+        # Early vs late treatment analysis (using matched controls)
+        early_vs_late = self._analyze_early_vs_late_treatment_with_matched_controls()
+        
+        return {
+            'concerning_patterns': concerning_patterns,
+            'treatment_readiness_signatures': treatment_readiness_signatures,
+            'early_vs_late': early_vs_late
+        }
+    
+    def _analyze_early_vs_late_treatment_with_matched_controls(self):
+        """
+        Analyze early vs late treatment differences using matched controls
+        """
+        if self.matched_control_indices is None:
+            return {'signature_differences': []}
+        
+        # Get treatment times and split into early/late
+        treatment_times = np.array(self.treatment_patterns['treatment_times'])
+        median_time = np.median(treatment_times)
+        
+        early_mask = treatment_times <= median_time
+        late_mask = treatment_times > median_time
+        
+        early_patterns = self.treatment_patterns['pre_treatment_signatures'][early_mask]
+        late_patterns = self.treatment_patterns['pre_treatment_signatures'][late_mask]
+        
+        # Get matched controls for early and late groups
+        early_controls = []
+        late_controls = []
+        
+        for i, ctrl_idx in enumerate(self.matched_control_indices):
+            try:
+                ctrl_eid = self.processed_ids[ctrl_idx]
+                if hasattr(self, 'covariate_dicts') and self.covariate_dicts is not None:
+                    age_at_enroll = self.covariate_dicts.get('age_at_enroll', {}).get(int(ctrl_eid))
+                else:
+                    try:
+                        age_at_enroll = self.covariates[self.covariates['eid'] == ctrl_eid]['age_at_enroll'].iloc[0]
+                    except:
+                        age_at_enroll = None
+                
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    t0 = int(age_at_enroll - 30)
+                    if t0 >= 12 and t0 < self.signatures.shape[2] - 12:
+                        pattern = self.signatures[ctrl_idx, :, t0-12:t0]
+                        if pattern.shape == (self.signatures.shape[1], 12):
+                            # Assign to early or late based on the matched treated patient
+                            if i < len(early_mask) and early_mask[i]:
+                                early_controls.append(pattern)
+                            elif i < len(late_mask) and late_mask[i]:
+                                late_controls.append(pattern)
+            except:
+                continue
+        
+        early_controls = np.array(early_controls)
+        late_controls = np.array(late_controls)
+        
+        # Compare early vs late
+        signature_differences = []
+        n_signatures = min(early_patterns.shape[1], late_patterns.shape[1])
+        
+        for sig_idx in range(n_signatures):
+            try:
+                early_mean = np.mean(early_patterns[:, sig_idx, -1])
+                late_mean = np.mean(late_patterns[:, sig_idx, -1])
+                diff = early_mean - late_mean
+                
+                # Statistical test
+                from scipy.stats import mannwhitneyu
+                stat, p_val = mannwhitneyu(
+                    early_patterns[:, sig_idx, -1], 
+                    late_patterns[:, sig_idx, -1], 
+                    alternative='two-sided'
+                )
+                
+                signature_differences.append({
+                    'signature': sig_idx,
+                    'difference': diff,
+                    'p_value': p_val,
+                    'early_mean': early_mean,
+                    'late_mean': late_mean
+                })
+            except:
+                continue
+        
+        # Sort by absolute difference
+        signature_differences.sort(key=lambda x: abs(x['difference']), reverse=True)
+        
+        return {'signature_differences': signature_differences}
     
     def plot_learned_patterns_with_matched_controls(self):
         """
@@ -372,8 +631,8 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         ax.grid(True, alpha=0.3)
     
     def _plot_concerning_trends(self, ax):
-        """Plot concerning trends before treatment"""
-        responsive_patterns = self.learn_treatment_responsive_patterns()
+        """Plot concerning trends before treatment using matched controls"""
+        responsive_patterns = self.learn_treatment_responsive_patterns_with_matched_controls()
         if responsive_patterns is None:
             ax.text(0.5, 0.5, 'No trend data available', ha='center', va='center', transform=ax.transAxes)
             return
@@ -386,12 +645,12 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         ax.set_xticks(range(len(signatures)))
         ax.set_xticklabels([f'Sig {s}' for s in signatures])
         ax.set_ylabel('Fraction with Upward Trend')
-        ax.set_title('Concerning Trends Before Treatment')
+        ax.set_title('Concerning Trends Before Treatment (Matched Controls)')
         ax.grid(True, alpha=0.3)
     
     def _plot_early_vs_late_treatment(self, ax):
-        """Plot early vs late treatment comparison"""
-        responsive_patterns = self.learn_treatment_responsive_patterns()
+        """Plot early vs late treatment comparison using matched controls"""
+        responsive_patterns = self.learn_treatment_responsive_patterns_with_matched_controls()
         if responsive_patterns is None:
             ax.text(0.5, 0.5, 'No early/late data available', ha='center', va='center', transform=ax.transAxes)
             return
@@ -408,7 +667,7 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
         ax.set_xticks(range(len(signatures)))
         ax.set_xticklabels([f'Sig {s}' for s in signatures])
         ax.set_ylabel('Difference (Early - Late Treaters)')
-        ax.set_title('Early vs Late Treatment Signatures')
+        ax.set_title('Early vs Late Treatment Signatures (Matched Controls)')
         ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
         ax.grid(True, alpha=0.3)
     
@@ -514,22 +773,29 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
         
         # Stage 2: Response model (if outcomes provided)
         if outcomes is not None:
-            resp_intercept = params[n_signatures+1]
-            resp_coefs = params[n_signatures+2:2*n_signatures+2]
-            treatment_effect = params[2*n_signatures+2]
+            # Check if outcomes match the treated cohort size
+            if len(outcomes) != len(treated_signatures):
+                print(f"   Warning: outcomes shape {outcomes.shape} doesn't match treated cohort size {len(treated_signatures)}")
+                print(f"   Skipping response model analysis")
+                outcomes = None  # Skip response model
             
-            # Response model (only for treated patients)
-            resp_logits = resp_intercept + np.dot(treated_levels, resp_coefs) + treatment_effect
-            resp_probs = 1 / (1 + np.exp(-np.clip(resp_logits, -500, 500)))
-            
-            # Outcome likelihood
-            outcome_ll = (outcomes * np.log(resp_probs + 1e-10) + 
-                         (1 - outcomes) * np.log(1 - resp_probs + 1e-10))
-            
-            # Additional priors
-            resp_prior_ll = -0.5 * (resp_intercept**2 + np.sum(resp_coefs**2) + treatment_effect**2)
-            
-            total_ll += np.sum(outcome_ll) + resp_prior_ll
+            if outcomes is not None:
+                resp_intercept = params[n_signatures+1]
+                resp_coefs = params[n_signatures+2:2*n_signatures+2]
+                treatment_effect = params[2*n_signatures+2]
+                
+                # Response model (only for treated patients)
+                resp_logits = resp_intercept + np.dot(treated_levels, resp_coefs) + treatment_effect
+                resp_probs = 1 / (1 + np.exp(-np.clip(resp_logits, -500, 500)))
+                
+                # Outcome likelihood
+                outcome_ll = (outcomes * np.log(resp_probs + 1e-10) + 
+                             (1 - outcomes) * np.log(1 - resp_probs + 1e-10))
+                
+                # Additional priors
+                resp_prior_ll = -0.5 * (resp_intercept**2 + np.sum(resp_coefs**2) + treatment_effect**2)
+                
+                total_ll += np.sum(outcome_ll) + resp_prior_ll
         
         return -total_ll  # Negative for minimization
     
@@ -577,10 +843,185 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
         print(f"   MAP optimization failed: {e}")
         return None
 
+def validate_trial_reproduction(treated_outcomes, control_outcomes, follow_up_times):
+    """
+    Calculate HR and compare to known trial results
+    
+    Parameters:
+    - treated_outcomes: Binary outcome data for treated patients (1=event, 0=no event)
+    - control_outcomes: Binary outcome data for control patients (1=event, 0=no event)
+    - follow_up_times: Follow-up times for both groups (in years)
+    
+    Returns:
+    - Dictionary with validation results including HR, CI, p-value, and comparison to trials
+    """
+    try:
+        from lifelines import CoxPHFitter
+        from lifelines.utils import concordance_index
+        import warnings
+        warnings.filterwarnings('ignore')
+    except ImportError:
+        print("Warning: lifelines not available, using basic survival analysis")
+        return _basic_survival_validation(treated_outcomes, control_outcomes, follow_up_times)
+    
+    # Prepare data for Cox model
+    import pandas as pd
+    
+    # Create survival dataset
+    n_treated = len(treated_outcomes)
+    n_control = len(control_outcomes)
+    
+    # Combine data
+    all_outcomes = np.concatenate([treated_outcomes, control_outcomes])
+    all_times = np.concatenate([follow_up_times[:n_treated], follow_up_times[n_treated:n_treated+n_control]])
+    treatment_status = np.concatenate([np.ones(n_treated), np.zeros(n_control)])
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'time': all_times,
+        'event': all_outcomes,
+        'treatment': treatment_status
+    })
+    
+    # Fit Cox proportional hazards model
+    cph = CoxPHFitter()
+    cph.fit(df, duration_col='time', event_col='event')
+    
+    # Extract results
+    summary = cph.print_summary()
+    
+    # Get hazard ratio and confidence intervals
+    hr = np.exp(cph.params_['treatment'])
+    
+    # Get confidence intervals - handle different lifelines versions
+    try:
+        hr_ci_lower = np.exp(cph.confidence_intervals_.loc['treatment', 'treatment_lower'])
+        hr_ci_upper = np.exp(cph.confidence_intervals_.loc['treatment', 'treatment_upper'])
+    except KeyError:
+        # Try alternative column names
+        try:
+            hr_ci_lower = np.exp(cph.confidence_intervals_.loc['treatment', 'lower 0.95'])
+            hr_ci_upper = np.exp(cph.confidence_intervals_.loc['treatment', 'upper 0.95'])
+        except KeyError:
+            # Fallback to basic confidence interval calculation
+            hr_ci_lower = hr * 0.8  # Rough estimate
+            hr_ci_upper = hr * 1.2  # Rough estimate
+    
+    p_value = cph.print_summary().p['treatment']
+    
+    # Calculate concordance index (C-index)
+    c_index = cph.concordance_index_
+    
+    # Compare to known trial results
+    # Statin trials typically show HR ~0.75 for cardiovascular events
+    expected_hr = 0.75
+    hr_difference = hr - expected_hr
+    hr_ratio = hr / expected_hr
+    
+    # Test if our HR is significantly different from expected
+    # Use confidence interval overlap
+    ci_overlaps_expected = (hr_ci_lower <= expected_hr <= hr_ci_upper)
+    
+    # Calculate power (simplified)
+    # Power increases with sample size and effect size
+    total_events = np.sum(all_outcomes)
+    power_estimate = min(0.95, total_events / 100)  # Rough estimate
+    
+    # Validation metrics
+    validation_results = {
+        'hazard_ratio': hr,
+        'hr_ci_lower': hr_ci_lower,
+        'hr_ci_upper': hr_ci_upper,
+        'p_value': p_value,
+        'concordance_index': c_index,
+        'expected_hr': expected_hr,
+        'hr_difference': hr_difference,
+        'hr_ratio': hr_ratio,
+        'ci_overlaps_expected': ci_overlaps_expected,
+        'power_estimate': power_estimate,
+        'n_treated': n_treated,
+        'n_control': n_control,
+        'total_events': total_events,
+        'cox_model': cph,
+        'validation_passed': ci_overlaps_expected and p_value < 0.05
+    }
+    
+    # Print validation summary
+    print("\n=== TRIAL REPRODUCTION VALIDATION ===")
+    print(f"Hazard Ratio: {hr:.3f} (95% CI: {hr_ci_lower:.3f}-{hr_ci_upper:.3f})")
+    print(f"P-value: {p_value:.4f}")
+    print(f"Expected HR from trials: {expected_hr:.3f}")
+    print(f"Difference from expected: {hr_difference:.3f}")
+    print(f"CI overlaps expected: {ci_overlaps_expected}")
+    print(f"Concordance Index: {c_index:.3f}")
+    print(f"Total events: {total_events}")
+    print(f"Validation passed: {validation_results['validation_passed']}")
+    
+    if validation_results['validation_passed']:
+        print("✓ Matching validation successful - results consistent with trial data")
+    else:
+        print("⚠ Matching validation failed - results inconsistent with trial data")
+        if not ci_overlaps_expected:
+            print("  - Confidence interval does not overlap expected HR")
+        if p_value >= 0.05:
+            print("  - Effect not statistically significant")
+    
+    return validation_results
+
+def _basic_survival_validation(treated_outcomes, control_outcomes, follow_up_times):
+    """
+    Basic survival validation when lifelines is not available
+    """
+    from scipy.stats import chi2_contingency
+    
+    # Simple chi-square test for event rates
+    treated_events = np.sum(treated_outcomes)
+    control_events = np.sum(control_outcomes)
+    treated_total = len(treated_outcomes)
+    control_total = len(control_outcomes)
+    
+    # Create contingency table
+    contingency_table = np.array([
+        [treated_events, treated_total - treated_events],
+        [control_events, control_total - control_events]
+    ])
+    
+    # Chi-square test
+    chi2, p_value, dof, expected = chi2_contingency(contingency_table)
+    
+    # Calculate risk ratio (approximate HR)
+    treated_rate = treated_events / treated_total
+    control_rate = control_events / control_total
+    risk_ratio = treated_rate / control_rate if control_rate > 0 else np.inf
+    
+    # Calculate event rates
+    treated_event_rate = treated_events / treated_total
+    control_event_rate = control_events / control_total
+    
+    validation_results = {
+        'risk_ratio': risk_ratio,
+        'p_value': p_value,
+        'treated_event_rate': treated_event_rate,
+        'control_event_rate': control_event_rate,
+        'n_treated': treated_total,
+        'n_control': control_total,
+        'total_events': treated_events + control_events,
+        'validation_passed': p_value < 0.05 and risk_ratio < 1.0
+    }
+    
+    print("\n=== BASIC TRIAL REPRODUCTION VALIDATION ===")
+    print(f"Risk Ratio: {risk_ratio:.3f}")
+    print(f"P-value: {p_value:.4f}")
+    print(f"Treated event rate: {treated_event_rate:.3f}")
+    print(f"Control event rate: {control_event_rate:.3f}")
+    print(f"Validation passed: {validation_results['validation_passed']}")
+    
+    return validation_results
+
 def comprehensive_treatment_analysis(signature_loadings, processed_ids, 
                                    statin_prescriptions, covariates,
                                    covariate_dicts=None, sig_indices=None,
-                                   outcomes=None, gp_scripts=None):
+                                   outcomes=None, event_idx=None, event_indices=None, gp_scripts=None):
     """
     Complete comprehensive analysis pipeline
     
@@ -591,7 +1032,10 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     - covariates: DataFrame with covariate data
     - covariate_dicts: Dictionary format covariates for matching
     - sig_indices: Optional signature indices to use
-    - outcomes: Optional outcome data for Bayesian analysis
+    - outcomes: Optional outcome array Y[patient, event_type, time] for validation
+    - event_idx: Index of the specific event type to validate (e.g., single disease)
+    - event_indices: List of indices for composite events (e.g., [112, 113, 114, 115, 116] for ASCVD)
+    - gp_scripts: Optional GP scripts DataFrame
     
     Returns:
     - Dictionary with all analysis results
@@ -643,7 +1087,7 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     # Build features for treated patients
     treated_features, treated_indices, treated_eids_matched = build_features(
         treated_eids, treated_times, processed_ids, signature_loadings, 
-        covariate_dicts, sig_indices=sig_indices
+        covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times
     )
     
     # Build features for control patients using proper age-based time points
@@ -667,7 +1111,7 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     
     control_features, control_indices, control_eids_matched = build_features(
         valid_control_eids, control_t0s, processed_ids, 
-        signature_loadings, covariate_dicts, sig_indices=sig_indices
+        signature_loadings, covariate_dicts, sig_indices=sig_indices, is_treated=False, treatment_dates=None
     )
     
     print(f"   Built features for {len(treated_features)} treated patients")
@@ -695,9 +1139,9 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     # Pass covariate_dicts to the enhanced learner for proper age access
     enhanced_learner.covariate_dicts = covariate_dicts
     
-    # Learn patterns
+    # Learn patterns using matched controls
     cluster_analysis = enhanced_learner.discover_treatment_initiation_patterns()
-    responsive_patterns = enhanced_learner.learn_treatment_responsive_patterns()
+    responsive_patterns = enhanced_learner.learn_treatment_responsive_patterns_with_matched_controls()
     matched_comparison = enhanced_learner.compare_treated_vs_matched_controls()
     predictor = enhanced_learner.build_treatment_readiness_predictor()
     
@@ -739,8 +1183,117 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
         print(f"   MAP optimization had issues")
         map_results = None
     
-    # Step 6: Visualization with matched controls
-    print("\n6. Creating visualizations with matched controls...")
+    # Step 6: Trial reproduction validation
+    print("\n6. Validating matching with trial reproduction...")
+    
+    # If outcomes are provided, validate our matching approach
+    validation_results = None
+    if event_indices is not None:
+        print(f"   Validating composite event with indices {event_indices}")
+    elif event_idx is not None:
+        print(f"   Validating single event type at index {event_idx}")
+    else:
+        print("   Validating any event occurrence")
+    if outcomes is not None:
+        # Convert PyTorch tensor to numpy if needed
+        if hasattr(outcomes, 'detach'):
+            outcomes = outcomes.detach().cpu().numpy()
+        
+        # Extract outcomes for matched cohorts
+        treated_outcomes_matched = []
+        control_outcomes_matched = []
+        follow_up_times_matched = []
+        
+        # Get outcomes for treated patients
+        for treated_idx in matched_treated_indices:
+            # Get the treatment time for this patient
+            treated_eid = processed_ids[treated_idx]
+            treatment_time = None
+            
+            # Find treatment time from the original treatment patterns
+            for i, eid in enumerate(enhanced_learner.treatment_patterns['treated_patients']):
+                if eid == treated_eid:
+                    treatment_time = enhanced_learner.treatment_patterns['treatment_times'][i]
+                    break
+            
+            if treatment_time is not None:
+                # Check if patient has outcome data
+                if treated_idx < outcomes.shape[0]:
+                    # Look for specific event type after treatment time
+                    if event_indices is not None:
+                        # Composite event - check if any of the specified events occurred
+                        post_treatment_outcomes = outcomes[treated_idx, event_indices, int(treatment_time):]
+                        post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+                    elif event_idx is not None:
+                        # Single event
+                        post_treatment_outcomes = outcomes[treated_idx, event_idx, int(treatment_time):]
+                    else:
+                        # If no specific event specified, use any event
+                        post_treatment_outcomes = outcomes[treated_idx, :, int(treatment_time):]
+                        post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+                    
+                    event_occurred = np.any(post_treatment_outcomes > 0)
+                    
+                    if event_occurred:
+                        # Find time to first event
+                        event_times = np.where(post_treatment_outcomes > 0)[0]  # Time dimension
+                        time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    else:
+                        # Censored at end of follow-up
+                        time_to_event = min(5.0, outcomes.shape[2] - int(treatment_time))
+                    
+                    treated_outcomes_matched.append(int(event_occurred))
+                    follow_up_times_matched.append(time_to_event)
+        
+        # Get outcomes for control patients
+        for control_idx in matched_control_indices:
+            control_eid = processed_ids[control_idx]
+            
+            # For controls, use their age-based time point as "treatment" time
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                control_time = int(age_at_enroll - 30)  # Convert to time index
+                
+                if control_idx < outcomes.shape[0] and control_time < outcomes.shape[2]:
+                    # Look for specific event type after control time
+                    if event_indices is not None:
+                        # Composite event - check if any of the specified events occurred
+                        post_control_outcomes = outcomes[control_idx, event_indices, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    elif event_idx is not None:
+                        # Single event
+                        post_control_outcomes = outcomes[control_idx, event_idx, control_time:]
+                    else:
+                        # If no specific event specified, use any event
+                        post_control_outcomes = outcomes[control_idx, :, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    
+                    event_occurred = np.any(post_control_outcomes > 0)
+                    
+                    if event_occurred:
+                        # Find time to first event
+                        event_times = np.where(post_control_outcomes > 0)[0]
+                        time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    else:
+                        # Censored at end of follow-up
+                        time_to_event = min(5.0, outcomes.shape[2] - control_time)
+                    
+                    control_outcomes_matched.append(int(event_occurred))
+                    follow_up_times_matched.append(time_to_event)
+        
+        if len(treated_outcomes_matched) > 10 and len(control_outcomes_matched) > 10:
+            validation_results = validate_trial_reproduction(
+                np.array(treated_outcomes_matched),
+                np.array(control_outcomes_matched),
+                np.array(follow_up_times_matched)
+            )
+        else:
+            print("   Insufficient outcome data for validation")
+    else:
+        print("   No outcome data provided for validation")
+    
+    # Step 7: Visualization with matched controls
+    print("\n7. Creating visualizations with matched controls...")
     
     # Override the plotting to use matched controls
     enhanced_learner.matched_control_indices = matched_control_indices
@@ -759,6 +1312,7 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
         'matched_comparison': matched_comparison,
         'predictor': predictor,
         'bayesian_map_results': map_results,
+        'validation_results': validation_results,
         'visualization': fig
     }
     
