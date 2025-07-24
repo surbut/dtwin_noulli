@@ -128,10 +128,10 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             print(f"Excluding EID {eid}: missing dm1_prev")
             continue  # Skip this patient
         
-        # EXCLUDE patients with diseases before treatment/enrollment (incident user logic)
+        # EXCLUDE patients with CAD before treatment/enrollment (incident user logic)
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         
-        # Determine the reference age for disease exclusion
+        # Determine the reference age for CAD exclusion
         if is_treated and treatment_dates is not None:
             # For treated patients: use first statin prescription date
             treatment_idx = eids.index(eid) if eid in eids else None
@@ -147,7 +147,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             reference_age = age_at_enroll
             reference_type = "enrollment"
         
-        # Check CAD exclusion
+        # Check CAD exclusion (only exclude CAD before index date)
         cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
         cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
         if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
@@ -155,29 +155,21 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                 print(f"Excluding EID {eid}: CAD occurred before {reference_type} (age {cad_censor_age:.1f} < {reference_age:.1f})")
                 continue  # Skip this patient
         
-        # Check DM exclusion
-        dm_any = covariate_dicts.get('Dm_Any', {}).get(int(eid), 0)
-        dm_censor_age = covariate_dicts.get('Dm_censor_age', {}).get(int(eid))
-        if dm_any == 2 and dm_censor_age is not None and not np.isnan(dm_censor_age):
-            if dm_censor_age < reference_age:
-                print(f"Excluding EID {eid}: DM occurred before {reference_type} (age {dm_censor_age:.1f} < {reference_age:.1f})")
-                continue  # Skip this patient
-        
-        # Check HTN exclusion
-        ht_any = covariate_dicts.get('Ht_Any', {}).get(int(eid), 0)
-        ht_censor_age = covariate_dicts.get('Ht_censor_age', {}).get(int(eid))
-        if ht_any == 2 and ht_censor_age is not None and not np.isnan(ht_censor_age):
-            if ht_censor_age < reference_age:
-                print(f"Excluding EID {eid}: HTN occurred before {reference_type} (age {ht_censor_age:.1f} < {reference_age:.1f})")
-                continue  # Skip this patient
-        
-        # Check HyperLip exclusion
-        hyperlip_any = covariate_dicts.get('HyperLip_Any', {}).get(int(eid), 0)
-        hyperlip_censor_age = covariate_dicts.get('HyperLip_censor_age', {}).get(int(eid))
-        if hyperlip_any == 2 and hyperlip_censor_age is not None and not np.isnan(hyperlip_censor_age):
-            if hyperlip_censor_age < reference_age:
-                print(f"Excluding EID {eid}: HyperLip occurred before {reference_type} (age {hyperlip_censor_age:.1f} < {reference_age:.1f})")
-                continue  # Skip this patient
+        # Check for missing DM/HTN/HyperLip status (exclude if unknown)
+        dm_any = covariate_dicts.get('Dm_Any', {}).get(int(eid))
+        if dm_any is None or np.isnan(dm_any):
+            print(f"Excluding EID {eid}: missing Dm_Any status")
+            continue  # Skip this patient
+            
+        ht_any = covariate_dicts.get('Ht_Any', {}).get(int(eid))
+        if ht_any is None or np.isnan(ht_any):
+            print(f"Excluding EID {eid}: missing Ht_Any status")
+            continue  # Skip this patient
+            
+        hyperlip_any = covariate_dicts.get('HyperLip_Any', {}).get(int(eid))
+        if hyperlip_any is None or np.isnan(hyperlip_any):
+            print(f"Excluding EID {eid}: missing HyperLip_Any status")
+            continue  # Skip this patient
         
         # For clinical variables: IMPUTE with mean
         ldl_prs = covariate_dicts.get('ldl_prs', {}).get(int(eid))
