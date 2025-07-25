@@ -1,0 +1,12 @@
+metric,value
+Hazard Ratio,0.8574524929915501
+HR CI Lower,0.6859619943932401
+HR CI Upper,1.02894299158986
+P-value,2.456467156548497e-13
+Concordance Index,0.45930397464385997
+Total Events,10766.0
+Treated Patients,43822.0
+Control Patients,43822.0
+Average Follow-up (years),13.25
+Median Follow-up (years),15.0
+Excluded Patients (ASCVD before index),762.0
