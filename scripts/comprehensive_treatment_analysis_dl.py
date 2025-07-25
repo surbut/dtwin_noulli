@@ -899,7 +899,7 @@ def validate_trial_reproduction(treated_outcomes, control_outcomes, follow_up_ti
             hr_ci_lower = hr * 0.8  # Rough estimate
             hr_ci_upper = hr * 1.2  # Rough estimate
     
-    p_value = cph.summary.loc['treatment', 'p']
+    p_value = cph.print_summary().p['treatment']
     
     # Calculate concordance index (C-index)
     c_index = cph.concordance_index_
