@@ -152,7 +152,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
         if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
             if cad_censor_age < reference_age:
-                print(f"Excluding EID {eid}: CAD occurred before {reference_type} (age {cad_censor_age:.1f} < {reference_age:.1f})")
+                #print(f"Excluding EID {eid}: CAD occurred before {reference_type} (age {cad_censor_age:.1f} < {reference_age:.1f})")
                 continue  # Skip this patient
         
         # Check for missing DM/HTN/HyperLip status (exclude if unknown)
@@ -258,6 +258,113 @@ def perform_nearest_neighbor_matching(treated_features, control_features,
     
     return (matched_treated_indices, matched_control_indices, 
             matched_treated_eids, matched_control_eids)
+
+def assess_matching_balance(treated_features, control_features, 
+                          matched_treated_indices, matched_control_indices,
+                          covariate_names=None):
+    """
+    Assess matching balance by comparing covariate distributions before and after matching
+    
+    Parameters:
+    - treated_features: Original treated patient features
+    - control_features: Original control patient features  
+    - matched_treated_indices: Indices of matched treated patients (local indices)
+    - matched_control_indices: Indices of matched control patients (local indices)
+    - covariate_names: Optional list of covariate names for labeling
+    
+    Returns:
+    - Dictionary with balance statistics
+    """
+    
+    # Use local indices for feature arrays
+    matched_treated_features = treated_features[matched_treated_indices]
+    matched_control_features = control_features[matched_control_indices]
+    
+    # Calculate statistics for each covariate
+    n_covariates = treated_features.shape[1]
+    balance_stats = {}
+    
+    for i in range(n_covariates):
+        # Before matching
+        treated_before = treated_features[:, i]
+        control_before = control_features[:, i]
+        
+        # After matching
+        treated_after = matched_treated_features[:, i]
+        control_after = matched_control_features[:, i]
+        
+        # Calculate standardized differences
+        def standardized_difference(group1, group2):
+            mean_diff = np.mean(group1) - np.mean(group2)
+            pooled_std = np.sqrt((np.var(group1) + np.var(group2)) / 2)
+            return mean_diff / pooled_std if pooled_std > 0 else 0
+        
+        # Calculate SEM (standard error of the mean)
+        def sem(group):
+            return np.std(group) / np.sqrt(len(group))
+        
+        # Before matching
+        std_diff_before = standardized_difference(treated_before, control_before)
+        treated_sem_before = sem(treated_before)
+        control_sem_before = sem(control_before)
+        
+        # After matching
+        std_diff_after = standardized_difference(treated_after, control_after)
+        treated_sem_after = sem(treated_after)
+        control_sem_after = sem(control_after)
+        
+        # Store results
+        cov_name = f"Covariate_{i}" if covariate_names is None else covariate_names[i]
+        balance_stats[cov_name] = {
+            'before_matching': {
+                'treated_mean': np.mean(treated_before),
+                'control_mean': np.mean(control_before),
+                'treated_sem': treated_sem_before,
+                'control_sem': control_sem_before,
+                'std_difference': std_diff_before
+            },
+            'after_matching': {
+                'treated_mean': np.mean(treated_after),
+                'control_mean': np.mean(control_after),
+                'treated_sem': treated_sem_after,
+                'control_sem': control_sem_after,
+                'std_difference': std_diff_after
+            },
+            'improvement': abs(std_diff_before) - abs(std_diff_after)
+        }
+    
+    return balance_stats
+
+def print_balance_summary(balance_stats, top_n=10):
+    """
+    Print a summary of the balance assessment
+    """
+    print("\n=== MATCHING BALANCE ASSESSMENT ===")
+    
+    # Sort by improvement (largest improvements first)
+    sorted_stats = sorted(balance_stats.items(), 
+                         key=lambda x: x[1]['improvement'], reverse=True)
+    
+    print(f"\nTop {top_n} covariates with largest balance improvements:")
+    print(f"{'Covariate':<20} {'Before':<10} {'After':<10} {'Improvement':<12}")
+    print("-" * 55)
+    
+    for i, (cov_name, stats) in enumerate(sorted_stats[:top_n]):
+        before_std = abs(stats['before_matching']['std_difference'])
+        after_std = abs(stats['after_matching']['std_difference'])
+        improvement = stats['improvement']
+        
+        print(f"{cov_name:<20} {before_std:<10.3f} {after_std:<10.3f} {improvement:<12.3f}")
+    
+    # Overall summary
+    all_improvements = [stats['improvement'] for stats in balance_stats.values()]
+    mean_improvement = np.mean(all_improvements)
+    max_improvement = max(all_improvements)
+    
+    print(f"\nOverall balance improvement:")
+    print(f"  Mean improvement: {mean_improvement:.3f}")
+    print(f"  Max improvement: {max_improvement:.3f}")
+    print(f"  Covariates with improved balance: {sum(1 for imp in all_improvements if imp > 0)}/{len(all_improvements)}")
 
 class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
     """
@@ -716,20 +823,11 @@ class EnhancedObservationalLearner(ObservationalTreatmentPatternLearner):
 def bayesian_map_propensity_response(treated_signatures, control_signatures, outcomes=None):
     """
     MAP estimation for Bayesian propensity-response model
-    Uses optimization instead of MCMC - leveraging your existing MAP approach
-    
-    Parameters:
-    - treated_signatures: Signature patterns for treated patients (N_t x K x T)
-    - control_signatures: Signature patterns for control patients (N_c x K x T)
-    - outcomes: Optional outcome data for treated patients
-    
-    Returns:
-    - map_results: Dictionary with MAP estimates and diagnostics
     """
     
     print("   Using MAP optimization for Bayesian analysis...")
     
-    # Prepare data like your clustering code
+    # Prepare data
     n_treated = len(treated_signatures)
     n_control = len(control_signatures)
     
@@ -743,8 +841,17 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
     
     n_patients, n_signatures = all_signatures.shape
     
+    # Check if outcomes are valid before defining the function
+    use_response_model = False
+    if outcomes is not None:
+        if len(outcomes) != len(treated_signatures):
+            print(f"   Warning: outcomes shape {outcomes.shape} doesn't match treated cohort size {len(treated_signatures)}")
+            print(f"   Skipping response model analysis")
+        else:
+            use_response_model = True
+    
     def neg_log_posterior(params):
-        """Negative log posterior - same optimization pattern as your MAP work"""
+        """Negative log posterior"""
         
         # Stage 1: Propensity model parameters
         prop_intercept = params[0]
@@ -752,7 +859,7 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
         
         # Propensity scores
         logits = prop_intercept + np.dot(all_signatures, prop_coefs)
-        probs = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))  # Stable sigmoid
+        probs = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))
         
         # Treatment likelihood
         treatment_ll = (treatment_status * np.log(probs + 1e-10) + 
@@ -763,43 +870,36 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
         
         total_ll = np.sum(treatment_ll) + prior_ll
         
-        # Stage 2: Response model (if outcomes provided)
-        if outcomes is not None:
-            # Check if outcomes match the treated cohort size
-            if len(outcomes) != len(treated_signatures):
-                print(f"   Warning: outcomes shape {outcomes.shape} doesn't match treated cohort size {len(treated_signatures)}")
-                print(f"   Skipping response model analysis")
-                outcomes = None  # Skip response model
+        # Stage 2: Response model (if outcomes provided and valid)
+        if use_response_model:
+            resp_intercept = params[n_signatures+1]
+            resp_coefs = params[n_signatures+2:2*n_signatures+2]
+            treatment_effect = params[2*n_signatures+2]
             
-            if outcomes is not None:
-                resp_intercept = params[n_signatures+1]
-                resp_coefs = params[n_signatures+2:2*n_signatures+2]
-                treatment_effect = params[2*n_signatures+2]
-                
-                # Response model (only for treated patients)
-                resp_logits = resp_intercept + np.dot(treated_levels, resp_coefs) + treatment_effect
-                resp_probs = 1 / (1 + np.exp(-np.clip(resp_logits, -500, 500)))
-                
-                # Outcome likelihood
-                outcome_ll = (outcomes * np.log(resp_probs + 1e-10) + 
-                             (1 - outcomes) * np.log(1 - resp_probs + 1e-10))
-                
-                # Additional priors
-                resp_prior_ll = -0.5 * (resp_intercept**2 + np.sum(resp_coefs**2) + treatment_effect**2)
-                
-                total_ll += np.sum(outcome_ll) + resp_prior_ll
+            # Response model (only for treated patients)
+            resp_logits = resp_intercept + np.dot(treated_levels, resp_coefs) + treatment_effect
+            resp_probs = 1 / (1 + np.exp(-np.clip(resp_logits, -500, 500)))
+            
+            # Outcome likelihood
+            outcome_ll = (outcomes * np.log(resp_probs + 1e-10) + 
+                         (1 - outcomes) * np.log(1 - resp_probs + 1e-10))
+            
+            # Additional priors
+            resp_prior_ll = -0.5 * (resp_intercept**2 + np.sum(resp_coefs**2) + treatment_effect**2)
+            
+            total_ll += np.sum(outcome_ll) + resp_prior_ll
         
         return -total_ll  # Negative for minimization
     
     # Initialize parameters
-    if outcomes is not None:
+    if use_response_model:
         n_params = 2 * n_signatures + 3  # prop + resp parameters
     else:
         n_params = n_signatures + 1  # prop parameters only
     
     init_params = np.random.normal(0, 0.1, n_params)
     
-    # Optimize (like your clustering approach)
+    # Optimize
     try:
         result = minimize(neg_log_posterior, init_params, method='BFGS', 
                          options={'maxiter': 1000})
@@ -814,7 +914,7 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
             'optimization_result': result
         }
         
-        if outcomes is not None:
+        if use_response_model:
             map_results.update({
                 'response_intercept': result.x[n_signatures+1],
                 'response_coefficients': result.x[n_signatures+2:2*n_signatures+2],
@@ -825,7 +925,7 @@ def bayesian_map_propensity_response(treated_signatures, control_signatures, out
         print(f"   MAP optimization converged: {result.success}")
         print(f"   Top 5 signatures for treatment propensity: {map_results['signatures_most_predictive']}")
         
-        if outcomes is not None:
+        if use_response_model:
             print(f"   Estimated treatment effect: {map_results['treatment_effect']:.3f}")
             print(f"   Top 5 signatures for treatment response: {map_results['signatures_most_responsive']}")
         
@@ -1120,8 +1220,20 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     
     print(f"   Successfully matched {len(matched_treated_indices)} pairs")
     
-    # Step 4: Enhanced observational pattern learning
-    print("\n4. Learning observational patterns with matched controls...")
+    # Step 4: Assess matching balance
+    print("\n4. Assessing matching balance...")
+    
+    # Create local indices for the matched patients (since feature arrays are subset arrays)
+    local_treated_indices = list(range(len(matched_treated_indices)))
+    local_control_indices = list(range(len(matched_control_indices)))
+    
+    balance_stats = assess_matching_balance(treated_features, control_features, 
+                                          local_treated_indices, local_control_indices,
+                                          covariate_names=None)  # We don't have covariate names from the feature building
+    print_balance_summary(balance_stats)
+
+    # Step 5: Enhanced observational pattern learning
+    print("\n5. Learning observational patterns with matched controls...")
     
     enhanced_learner = EnhancedObservationalLearner(
         signature_loadings, processed_ids, statin_prescriptions, covariates,
@@ -1140,12 +1252,16 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     if predictor:
         print(f"   Treatment readiness model AUC: {predictor['cv_auc']:.3f}")
     
-    # Step 5: Bayesian MAP causal inference
-    print("\n5. Performing Bayesian MAP propensity-response analysis...")
+    # Step 6: Bayesian MAP causal inference
+    print("\n6. Performing Bayesian MAP propensity-response analysis...")
     
     # Extract signature patterns for matched cohorts
-    treated_patterns = enhanced_learner.treatment_patterns['pre_treatment_signatures']
-    
+    all_treated_patterns = enhanced_learner.treatment_patterns['pre_treatment_signatures']
+
+    # Subset to only the matched treated patients
+    matched_treated_patterns = all_treated_patterns[:len(matched_treated_indices)]
+    print(f"   Subsetting treated patterns: {all_treated_patterns.shape} -> {matched_treated_patterns.shape}")
+
     # Extract control patterns using proper time points (not random)
     control_patterns = []
     for ctrl_idx in matched_control_indices:
@@ -1161,12 +1277,42 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
                         control_patterns.append(pattern)
         except:
             continue
-    
-    control_patterns = np.array(control_patterns[:len(treated_patterns)])
-    
-    # Run MAP-based Bayesian analysis
+
+    control_patterns = np.array(control_patterns[:len(matched_treated_patterns)])
+
+    # SUBSET OUTCOMES TO MATCHED TREATED PATIENTS
+    if outcomes is not None:
+        # Convert to numpy if needed
+        if hasattr(outcomes, 'detach'):
+            outcomes_np = outcomes.detach().cpu().numpy()
+        else:
+            outcomes_np = outcomes
+        
+        # Get the original treated indices (before matching)
+        original_treated_indices = treated_indices  # This should be available from Step 2
+        
+        # Subset outcomes to only the matched treated patients
+        matched_treated_outcomes_full = outcomes_np[original_treated_indices]
+        print(f"   Subsetting outcomes: {outcomes_np.shape} -> {matched_treated_outcomes_full.shape}")
+        
+        # Extract specific outcomes for the event we're analyzing
+        if event_indices is not None:
+            # For composite events (like ASCVD), check if any event occurred
+            matched_treated_outcomes = np.any(matched_treated_outcomes_full[:, event_indices, :] > 0, axis=(1, 2))
+        elif event_idx is not None:
+            # For single event
+            matched_treated_outcomes = np.any(matched_treated_outcomes_full[:, event_idx, :] > 0, axis=1)
+        else:
+            # For any event
+            matched_treated_outcomes = np.any(matched_treated_outcomes_full > 0, axis=(1, 2))
+        
+        print(f"   Extracted binary outcomes shape: {matched_treated_outcomes.shape}")
+    else:
+        matched_treated_outcomes = None
+
+    # Run MAP-based Bayesian analysis with subsetted outcomes
     map_results = bayesian_map_propensity_response(
-        treated_patterns, control_patterns, outcomes=outcomes
+        matched_treated_patterns, control_patterns, outcomes=matched_treated_outcomes
     )
     
     if map_results and map_results['converged']:
@@ -1175,8 +1321,8 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
         print(f"   MAP optimization had issues")
         map_results = None
     
-    # Step 6: Trial reproduction validation
-    print("\n6. Validating matching with trial reproduction...")
+    # Step 7: Trial reproduction validation
+    print("\n7. Validating matching with trial reproduction...")
     
     # If outcomes are provided, validate our matching approach
     validation_results = None
@@ -1284,8 +1430,8 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     else:
         print("   No outcome data provided for validation")
     
-    # Step 7: Visualization with matched controls
-    print("\n7. Creating visualizations with matched controls...")
+    # Step 8: Visualization with matched controls
+    print("\n8. Creating visualizations with matched controls...")
     
     # Override the plotting to use matched controls
     enhanced_learner.matched_control_indices = matched_control_indices
