@@ -1223,14 +1223,68 @@ def comprehensive_treatment_analysis(signature_loadings, processed_ids,
     # Step 4: Assess matching balance
     print("\n4. Assessing matching balance...")
     
-    # Create local indices for the matched patients (since feature arrays are subset arrays)
-    local_treated_indices = list(range(len(matched_treated_indices)))
-    local_control_indices = list(range(len(matched_control_indices)))
+    # Get the actual covariate data for the matched patients
+    matched_treated_eids = [processed_ids[i] for i in matched_treated_indices]
+    matched_control_eids = [processed_ids[i] for i in matched_control_indices]
     
-    balance_stats = assess_matching_balance(treated_features, control_features, 
-                                          local_treated_indices, local_control_indices,
-                                          covariate_names=None)  # We don't have covariate names from the feature building
-    print_balance_summary(balance_stats)
+    # Extract key covariates for balance assessment
+    key_covariates = ['age_at_enroll', 'tchol', 'hdl', 'SBP', 'pce_goff', 'sex', 
+                     'dm2_prev', 'antihtnbase', 'dm1_prev']
+    
+    balance_stats = {}
+    for cov_name in key_covariates:
+        if cov_name in covariate_dicts:
+            # Get values for treated and control groups
+            treated_values = []
+            control_values = []
+            
+            for eid in matched_treated_eids:
+                val = covariate_dicts[cov_name].get(int(eid))
+                if val is not None and not np.isnan(val):
+                    treated_values.append(val)
+            
+            for eid in matched_control_eids:
+                val = covariate_dicts[cov_name].get(int(eid))
+                if val is not None and not np.isnan(val):
+                    control_values.append(val)
+            
+            if len(treated_values) > 0 and len(control_values) > 0:
+                # Calculate SMD
+                def compute_smd(x1, x0):
+                    m1, m0 = np.nanmean(x1), np.nanmean(x0)
+                    s1, s0 = np.nanstd(x1), np.nanstd(x0)
+                    return np.abs(m1 - m0) / np.sqrt((s1**2 + s0**2) / 2)
+                
+                smd = compute_smd(treated_values, control_values)
+                
+                balance_stats[cov_name] = {
+                    'treated_mean': np.mean(treated_values),
+                    'control_mean': np.mean(control_values),
+                    'treated_std': np.std(treated_values),
+                    'control_std': np.std(control_values),
+                    'smd': smd,
+                    'n_treated': len(treated_values),
+                    'n_control': len(control_values)
+                }
+    
+    # Print balance summary
+    print("\n=== MATCHING BALANCE ASSESSMENT ===")
+    print(f"{'Covariate':<15} {'Treated Mean':<12} {'Control Mean':<12} {'SMD':<8}")
+    print("-" * 50)
+    
+    for cov_name, stats in balance_stats.items():
+        print(f"{cov_name:<15} {stats['treated_mean']:<12.3f} {stats['control_mean']:<12.3f} {stats['smd']:<8.3f}")
+    
+    # Check how many covariates have SMD < 0.1 (good balance)
+    well_balanced = sum(1 for stats in balance_stats.values() if stats['smd'] < 0.1)
+    print(f"\nCovariates with SMD < 0.1 (good balance): {well_balanced}/{len(balance_stats)}")
+    
+    if well_balanced == len(balance_stats):
+        print("✓ Excellent balance achieved!")
+    elif well_balanced >= len(balance_stats) * 0.8:
+        print("✓ Good balance achieved")
+    else:
+        print("⚠ Balance could be improved")
 
     # Step 5: Enhanced observational pattern learning
     print("\n5. Learning observational patterns with matched controls...")
