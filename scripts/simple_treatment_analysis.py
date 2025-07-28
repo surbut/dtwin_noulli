@@ -357,6 +357,27 @@ def assess_matching_balance(treated_features, control_features,
     n_covariates = treated_features.shape[1]
     balance_stats = {}
     
+    # Define meaningful covariate names based on feature structure
+    # Features are: [signatures (10 years * n_sigs), age, sex, dm2, antihtn, dm1, ldl_prs, cad_prs, tchol, hdl, sbp, pce_goff, smoke_never, smoke_prev, smoke_current]
+    if covariate_names is None:
+        # Calculate signature count from feature dimension
+        n_signatures = (n_covariates - 15) // 10  # 15 clinical covariates, 10 years per signature
+        
+        covariate_names = []
+        
+        # Add signature names
+        for sig_idx in range(n_signatures):
+            for year in range(10):
+                covariate_names.append(f"Signature_{sig_idx}_Year_{year}")
+        
+        # Add clinical covariate names
+        clinical_names = [
+            "Age", "Sex", "DM2_Prev", "AntiHTN_Base", "DM1_Prev",
+            "LDL_PRS", "CAD_PRS", "Total_Cholesterol", "HDL", "SBP",
+            "PCE_Goff", "Smoke_Never", "Smoke_Previous", "Smoke_Current"
+        ]
+        covariate_names.extend(clinical_names)
+    
     for i in range(n_covariates):
         # Before matching
         treated_before = treated_features[:, i]
@@ -387,7 +408,7 @@ def assess_matching_balance(treated_features, control_features,
         control_sem_after = sem(control_after)
         
         # Store results
-        cov_name = f"Covariate_{i}" if covariate_names is None else covariate_names[i]
+        cov_name = covariate_names[i] if i < len(covariate_names) else f"Covariate_{i}"
         balance_stats[cov_name] = {
             'before_matching': {
                 'treated_mean': np.mean(treated_before),
