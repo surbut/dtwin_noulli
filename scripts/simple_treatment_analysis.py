@@ -108,7 +108,8 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             # For treated patients: use treatment age as index date
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
-                treatment_age = age_at_enroll + (treatment_dates[treatment_idx] / 12)  # Convert months to years
+                # treatment_dates[treatment_idx] is already a time index (years), not months
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
                 age = treatment_age  # Use treatment age for matching
             else:
                 age = age_at_enroll
