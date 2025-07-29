@@ -141,7 +141,9 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             # For treated patients: use first statin prescription date
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
-                treatment_age = age_at_enroll + (treatment_dates[treatment_idx] / 12)
+                # treatment_dates[treatment_idx] is already a time index (years), not months
+                #treatment_age = age_at_enroll + treatment_dates[treatment_idx] / 12 # Convert time index to years
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
                 reference_age = age_at_enroll
@@ -551,7 +553,7 @@ def verify_matching_results(matched_treated_eids, matched_control_eids, true_sta
         return False
 
 def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=None, 
-                            thetas=None, covariate_dicts=None, Y=None, event_indices=None, cov=None):
+                            thetas=None, sig_indices=None, covariate_dicts=None, Y=None, event_indices=None, cov=None):
     """
     Simplified treatment analysis with explicit self-checking
     
@@ -657,7 +659,7 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     # Step 4: Build features for treated patients
     print("\n4. Building features for treated patients:")
     # Use same sig_indices logic as comprehensive analysis
-    sig_indices = [5] if event_indices is not None else None
+    #sig_indices = [5] if event_indices is not None else None
     treated_features, treated_indices, treated_eids_matched = build_features(
         treated_eids, treated_times, processed_ids, thetas, 
         covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times
