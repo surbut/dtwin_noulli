@@ -818,7 +818,7 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             print("✅ Same clean control definition (no statins ever)")
             print("✅ Same exclusions (CAD before index, missing binary data)")
             print("✅ Same imputation (mean for quantitative variables)")
-            print("✅ Same matching (nearest neighbor with signature 5 + clinical)")
+            print("✅ Same matching (nearest neighbor with signatures + clinical)")
             print("✅ Same outcome extraction (events after index time)")
             print("✅ Same follow-up logic (minimum 5 years, maximum until 2023)")
             print("✅ Should produce same HR as comprehensive analysis")
