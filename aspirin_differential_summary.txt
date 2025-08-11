@@ -1,0 +1,26 @@
+ASPIRIN-COLORECTAL CANCER DIFFERENTIAL TREATMENT EFFECTS ANALYSIS
+================================================================================
+Analysis Date: 2025-08-10 20:19:04
+
+SUMMARY:
+----------------------------------------
+Total patients analyzed: 66178
+Cancer types analyzed: 2
+Total differential signatures found: 15
+
+
+Colorectal_Cancer_10:
+---------------------
+  Patients: 33089
+  Overall treatment effect: -0.0004
+  Differential signatures: 11
+  Top signature: Signature_17 (effect size: -0.070)
+
+Colorectal_Cancer_11:
+---------------------
+  Patients: 33089
+  Overall treatment effect: -0.0001
+  Differential signatures: 4
+  Top signature: Signature_17 (effect size: -0.047)
+
+Detailed results saved in analysis objects.

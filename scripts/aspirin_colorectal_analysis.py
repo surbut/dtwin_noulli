@@ -759,7 +759,32 @@ def aspirin_colorectal_analysis(gp_scripts=None, true_aspirins=None, processed_i
             print(f"Protective effect detected: {hr_results['protective_effect']}")
             print(f"Validation passed: {ci_overlaps_expected and hr_results['p_value'] < 0.05}")
             
-            return hr_results
+            # Return comprehensive results including matched patient IDs and treatment times
+            comprehensive_results = {
+                'hazard_ratio_results': hr_results,
+                'matched_patients': {
+                    'treated_eids': matched_treated_eids,
+                    'control_eids': matched_control_eids,
+                    'treated_indices': matched_treated_indices,
+                    'control_indices': matched_control_indices
+                },
+                'treatment_times': {
+                    'treated_times': [treated_times[i] for i, eid in enumerate(treated_eids) if eid in matched_treated_eids],
+                    'control_times': [control_t0s[i] for i, eid in enumerate(valid_control_eids) if eid in matched_control_eids]
+                },
+                'cohort_sizes': {
+                    'n_treated': len(matched_treated_eids),
+                    'n_control': len(matched_control_eids),
+                    'n_total': len(matched_treated_eids) + len(matched_control_eids)
+                },
+                'matching_features': {
+                    'treated_features': treated_features,
+                    'control_features': control_features,
+                    'feature_names': ['signatures'] + ['age', 'sex', 'dm2', 'antihtn', 'dm1', 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'sbp', 'pce_goff', 'smoke_never', 'smoke_previous', 'smoke_current']
+                }
+            }
+            
+            return comprehensive_results
         else:
             print("   Insufficient outcome data for HR calculation")
             return None
@@ -770,4 +795,36 @@ def aspirin_colorectal_analysis(gp_scripts=None, true_aspirins=None, processed_i
 # Run the analysis
 if __name__ == "__main__":
     # For standalone execution, these would need to be loaded
-    results = aspirin_colorectal_analysis() 
+    results = aspirin_colorectal_analysis()
+    
+    if results is not None:
+        print("\n=== COMPREHENSIVE RESULTS SUMMARY ===")
+        print(f"Matched pairs: {results['cohort_sizes']['n_treated']:,}")
+        print(f"Total patients: {results['cohort_sizes']['n_total']:,}")
+        
+        hr_results = results['hazard_ratio_results']
+        print(f"Hazard Ratio: {hr_results['hazard_ratio']:.3f}")
+        print(f"95% CI: {hr_results['hr_ci_lower']:.3f} - {hr_results['hr_ci_upper']:.3f}")
+        print(f"P-value: {hr_results['p_value']:.4f}")
+        
+        # Now you can access matched patients for further analysis:
+        matched_treated_eids = results['matched_patients']['treated_eids']
+        matched_control_eids = results['matched_patients']['control_eids']
+        print(f"\nMatched treated EIDs: {len(matched_treated_eids):,}")
+        print(f"Matched control EIDs: {len(matched_control_eids):,}")
+        
+        # Show treatment times
+        treated_times = results['treatment_times']['treated_times']
+        control_times = results['treatment_times']['control_times']
+        print(f"Treated times (years from enrollment): {len(treated_times):,}")
+        print(f"Control times (years from enrollment): {len(control_times):,}")
+        
+        # Example: You can now use these for differential response analysis
+        print("\nYou can now use these matched patient IDs for:")
+        print("- Differential response analysis")
+        print("- Signature heterogeneity testing") 
+        print("- Individual treatment effect analysis")
+        print("- Subgroup analysis by signature patterns")
+        print("- Running run_aspirin_differential_analysis.py")
+    else:
+        print("Analysis failed - no results returned") 

@@ -823,7 +823,33 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             print("✅ Same follow-up logic (minimum 5 years, maximum until 2023)")
             print("✅ Should produce same HR as comprehensive analysis")
             
-            return hr_results
+            # Return comprehensive results including matched patient IDs and treatment times
+            comprehensive_results = {
+                'hazard_ratio_results': hr_results,
+                'matched_patients': {
+                    'treated_eids': matched_treated_eids,
+                    'control_eids': matched_control_eids,
+                    'treated_indices': matched_treated_indices,
+                    'control_indices': matched_control_indices
+                },
+                'treatment_times': {
+                    'treated_times': [treated_times[i] for i, eid in enumerate(treated_eids) if eid in matched_treated_eids],
+                    'control_times': [control_t0s[i] for i, eid in enumerate(valid_control_eids) if eid in matched_control_eids]
+                },
+                'cohort_sizes': {
+                    'n_treated': len(matched_treated_eids),
+                    'n_control': len(matched_control_eids),
+                    'n_total': len(matched_treated_eids) + len(matched_control_eids)
+                },
+                'matching_features': {
+                    'treated_features': treated_features,
+                    'control_features': control_features,
+                    'feature_names': ['signatures'] + ['age', 'sex', 'dm2', 'antihtn', 'dm1', 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'sbp', 'pce_goff', 'smoke_never', 'smoke_previous', 'smoke_current']
+                },
+                'balance_stats': balance_stats
+            }
+            
+            return comprehensive_results
         else:
             print("   Insufficient outcome data for HR calculation")
             return None
@@ -892,3 +918,39 @@ def check_comprehensive_controls_contamination(results, true_statins):
 if __name__ == "__main__":
     # For standalone execution, these would need to be loaded
     results = simple_treatment_analysis()
+    
+    if results is not None:
+        print("\n=== COMPREHENSIVE RESULTS SUMMARY ===")
+        print(f"Matched pairs: {results['cohort_sizes']['n_treated']:,}")
+        print(f"Total patients: {results['cohort_sizes']['n_total']:,}")
+        
+        hr_results = results['hazard_ratio_results']
+        print(f"Hazard Ratio: {hr_results['hazard_ratio']:.3f}")
+        print(f"95% CI: {hr_results['hr_ci_lower']:.3f} - {hr_results['hr_ci_upper']:.3f}")
+        print(f"P-value: {hr_results['p_value']:.4f}")
+        
+        # Now you can access matched patients for further analysis:
+        matched_treated_eids = results['matched_patients']['treated_eids']
+        matched_control_eids = results['matched_patients']['control_eids']
+        print(f"\nMatched treated EIDs: {len(matched_treated_eids):,}")
+        print(f"Matched control EIDs: {len(matched_control_eids):,}")
+        
+        # Show treatment times
+        treated_times = results['treatment_times']['treated_times']
+        control_times = results['treatment_times']['control_times']
+        print(f"Treated times (years from enrollment): {len(treated_times):,}")
+        print(f"Control times (years from enrollment): {len(control_times):,}")
+        
+        # Show balance stats
+        balance_stats = results['balance_stats']
+        print(f"\nMatching balance assessment available")
+        
+        # Example: You can now use these for differential response analysis
+        print("\nYou can now use these matched patient IDs for:")
+        print("- Differential response analysis")
+        print("- Signature heterogeneity testing") 
+        print("- Individual treatment effect analysis")
+        print("- Subgroup analysis by signature patterns")
+        print("- Running any post-matching analysis scripts")
+    else:
+        print("Analysis failed - no results returned")
