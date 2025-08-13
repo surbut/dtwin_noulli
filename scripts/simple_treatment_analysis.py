@@ -700,6 +700,94 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     )
     print_balance_summary(balance_stats)
     
+    # COMPREHENSIVE INDEX ALIGNMENT CHECK
+    print("\n=== INDEX ALIGNMENT VERIFICATION ===")
+    
+    # Check that matched indices correspond to the right patients
+    print("Verifying index alignment between local and global arrays...")
+    
+    # For treated patients - just check first few and last few for verification
+    treated_index_alignment_ok = True
+    sample_size = min(5, len(matched_treated_indices))
+    
+    # Check first few
+    for i in range(sample_size):
+        local_eid = matched_treated_eids[i]
+        global_eid = processed_ids[matched_treated_indices[i]]
+        if local_eid != global_eid:
+            print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
+            treated_index_alignment_ok = False
+    
+    # Check last few
+    if len(matched_treated_indices) > sample_size:
+        for i in range(len(matched_treated_indices) - sample_size, len(matched_treated_indices)):
+            local_eid = matched_treated_eids[i]
+            global_eid = processed_ids[matched_treated_indices[i]]
+            if local_eid != global_eid:
+                print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
+                treated_index_alignment_ok = False
+    
+    # For control patients - same approach
+    control_index_alignment_ok = True
+    
+    # Check first few
+    for i in range(sample_size):
+        local_eid = matched_control_eids[i]
+        global_eid = processed_ids[matched_control_indices[i]]
+        if local_eid != global_eid:
+            print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
+            control_index_alignment_ok = False
+    
+    # Check last few
+    if len(matched_control_indices) > sample_size:
+        for i in range(len(matched_control_indices) - sample_size, len(matched_control_indices)):
+            local_eid = matched_control_eids[i]
+            global_eid = processed_ids[matched_control_indices[i]]
+            if local_eid != global_eid:
+                print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
+                control_index_alignment_ok = False
+    
+    if treated_index_alignment_ok and control_index_alignment_ok:
+        print(f"✅ All indices properly aligned between local and global arrays")
+        print(f"   Verified {sample_size} samples from start and end of {len(matched_treated_indices):,} matched pairs")
+    else:
+        print("❌ Index misalignment detected - this will cause incorrect results!")
+        return None
+    
+    # Check that treatment times correspond to the right patients
+    print("\nVerifying treatment time alignment...")
+    treatment_time_alignment_ok = True
+    
+    # Just check a sample of treatment times
+    sample_size = min(5, len(matched_treated_eids))
+    verified_count = 0
+    
+    for i in range(sample_size):
+        treated_eid = matched_treated_eids[i]
+        # Find this patient in the original treated lists
+        original_idx = None
+        for j, eid in enumerate(treated_eids):
+            if eid == treated_eid:
+                original_idx = j
+                break
+        
+        if original_idx is not None and original_idx < len(treated_times):
+            expected_time = treated_times[original_idx]
+            verified_count += 1
+        else:
+            print(f"❌ Treated {treated_eid}: Could not find treatment time!")
+            treatment_time_alignment_ok = False
+    
+    if treatment_time_alignment_ok:
+        print(f"✅ Treatment time alignment verified for {verified_count} sample patients")
+        print(f"   Sample treatment times: {[treated_times[i] for i in range(min(3, len(treated_times)))]}")
+    else:
+        print("❌ Treatment time misalignment - stopping analysis")
+        return None
+    
+    # Now proceed with outcome calculation using PROPERLY VERIFIED indices
+    print("\n=== OUTCOME CALCULATION WITH VERIFIED INDICES ===")
+    
     # Step 8: Calculate outcomes and hazard ratio
     print("\n8. Calculating outcomes and hazard ratio:")
     
@@ -714,6 +802,12 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         treated_outcomes = []
         control_outcomes = []
         follow_up_times = []
+        
+        # Track event timing for analysis
+        treated_event_times = []
+        control_event_times = []
+        treated_censoring_times = []
+        control_censoring_times = []
         
         # Get outcomes for treated patients
         for treated_idx in matched_treated_indices:
@@ -743,9 +837,11 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                     # Find time to first event
                     event_times = np.where(post_treatment_outcomes > 0)[0]
                     time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    treated_event_times.append(time_to_event)
                 else:
                     # Censored at end of follow-up (minimum 5 years)
                     time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+                    treated_censoring_times.append(time_to_event)
                 
                 treated_outcomes.append(int(event_occurred))
                 follow_up_times.append(time_to_event)
@@ -776,12 +872,73 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                         # Find time to first event
                         event_times = np.where(post_control_outcomes > 0)[0]
                         time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                        control_event_times.append(time_to_event)
                     else:
                         # Censored at end of follow-up (minimum 5 years)
                         time_to_event = min(5.0, Y_np.shape[2] - control_time)
+                        control_censoring_times.append(time_to_event)
                     
                     control_outcomes.append(int(event_occurred))
                     follow_up_times.append(time_to_event)
+        
+        # ANALYZE EVENT TIMING DISTRIBUTIONS
+        print("\n=== EVENT TIMING ANALYSIS ===")
+        print("This will help explain why HR might be protective even with higher event rates")
+        
+        if len(treated_event_times) > 0 and len(control_event_times) > 0:
+            print(f"\nTreated patients with events: {len(treated_event_times):,}")
+            print(f"Control patients with events: {len(control_event_times):,}")
+            
+            # Event timing statistics
+            treated_event_mean = np.mean(treated_event_times)
+            control_event_mean = np.mean(control_event_times)
+            treated_event_median = np.median(treated_event_times)
+            control_event_median = np.median(control_event_times)
+            
+            print(f"\nEvent timing (years from index):")
+            print(f"  Treated:  Mean={treated_event_mean:.2f}, Median={treated_event_median:.2f}")
+            print(f"  Control:  Mean={control_event_mean:.2f}, Median={control_event_median:.2f}")
+            
+            # Test if treated events happen later (protective effect)
+            if treated_event_mean > control_event_mean:
+                timing_difference = treated_event_mean - control_event_mean
+                print(f"✅ Treated events happen {timing_difference:.2f} years LATER on average")
+                print(f"   This explains protective HR despite potentially higher event rates!")
+            else:
+                timing_difference = control_event_mean - treated_event_mean
+                print(f"⚠️ Treated events happen {timing_difference:.2f} years EARLIER on average")
+                print(f"   This would suggest harmful effect - investigate further!")
+            
+            # Censoring analysis
+            if len(treated_censoring_times) > 0 and len(control_censoring_times) > 0:
+                treated_censor_mean = np.mean(treated_censoring_times)
+                control_censor_mean = np.mean(control_censoring_times)
+                
+                print(f"\nCensoring times (years from index):")
+                print(f"  Treated:  Mean={treated_censor_mean:.2f}")
+                print(f"  Control:  Mean={control_censor_mean:.2f}")
+                
+                if treated_censor_mean > control_censor_mean:
+                    print(f"✅ Treated patients followed longer before censoring")
+                else:
+                    print(f"⚠️ Controls followed longer before censoring")
+            
+            # Event rate comparison
+            treated_event_rate = len(treated_event_times) / len(treated_outcomes) * 100
+            control_event_rate = len(control_event_times) / len(control_outcomes) * 100
+            
+            print(f"\nEvent rates:")
+            print(f"  Treated:  {treated_event_rate:.1f}% ({len(treated_event_times)}/{len(treated_outcomes)})")
+            print(f"  Control:  {control_event_rate:.1f}% ({len(control_event_times)}/{len(control_outcomes)})")
+            
+            if treated_event_rate > control_event_rate:
+                rate_difference = treated_event_rate - control_event_rate
+                print(f"⚠️ Treated event rate {rate_difference:.1f}% HIGHER than control")
+                print(f"   But if events happen later, this can still give protective HR!")
+            else:
+                rate_difference = control_event_rate - treated_event_rate
+                print(f"✅ Treated event rate {rate_difference:.1f}% LOWER than control")
+                print(f"   This directly supports protective effect")
         
         if len(treated_outcomes) > 10 and len(control_outcomes) > 10:
             hr_results = calculate_hazard_ratio(

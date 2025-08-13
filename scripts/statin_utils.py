@@ -102,4 +102,26 @@ def basic_analysis(gp_scripts):
     # Find statins
     statins = find_statins_basic(df)
     
+    
     return df, statins
+
+
+# Clean up the statin data - remove non-statins
+#true_statins = statins[statins['drug_name'].str.contains(
+#    'simvastatin|atorvastatin|rosuvastatin|pravastatin|fluvastatin|lovastatin', 
+#    case=False, na=False
+#)].copy()
+
+#print(f"Total prescription records: {len(statins)}")
+#print(f"True statins after filtering: {len(true_statins)}")
+#print(f"Unique patients with true statins: {true_statins['eid'].nunique()}")
+
+# Show distribution of statin types
+#if len(true_statins) > 0:
+#    statin_counts = true_statins['drug_name'].value_counts().head(10)
+#    print("\nTop 10 statin types:")
+#    print(statin_counts)
+
+
+#true_statins.to_csv('true_statins.csv', index=False)
+#cov.to_csv('cov.csv', index=False)

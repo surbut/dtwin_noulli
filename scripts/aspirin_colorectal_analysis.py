@@ -66,18 +66,31 @@ def find_aspirin_basic(gp_scripts):
                 print(f"  Sample: {df[beclo_with_keyword]['drug_name'].head().tolist()}")
     
     # Search for antiplatelet BNF codes (2.9 - Antiplatelet drugs)
-    # More specific patterns to avoid including other drugs like Beclometasone
-    bnf_patterns = ['02.09.']  # Only match codes starting with 02.09. (antiplatelets)
+    # More specific patterns to avoid including other drugs like clopidogrel
+    # 02.09.01 = Aspirin, 02.09.02 = Dipyridamole, 02.09.03 = Clopidogrel, etc.
+    bnf_patterns = ['02.09.01.']  # Only match aspirin-specific BNF codes
     bnf_mask = False
     for pattern in bnf_patterns:
         pattern_mask = df['bnf_code_str'].str.startswith(pattern, na=False)
         bnf_mask = bnf_mask | pattern_mask
         if pattern_mask.sum() > 0:
-            print(f"Found {pattern_mask.sum()} prescriptions with BNF pattern '{pattern}'")
+            print(f"Found {pattern_mask.sum()} prescriptions with BNF pattern '{pattern}' (aspirin-specific)")
+    
+    # Also check what we're excluding
+    clopidogrel_pattern = '02.09.03.'
+    clopidogrel_mask = df['bnf_code_str'].str.startswith(clopidogrel_pattern, na=False)
+    if clopidogrel_mask.sum() > 0:
+        print(f"Excluded {clopidogrel_mask.sum()} clopidogrel prescriptions (BNF {clopidogrel_pattern})")
     
     # Combine results
     all_aspirin_mask = aspirin_mask | bnf_mask
     aspirins = df[all_aspirin_mask].copy()
+    
+    # Remove any clopidogrel that might have slipped through
+    clopidogrel_mask = aspirins['drug_name_str'].str.contains('clopidogrel', case=False, na=False)
+    if clopidogrel_mask.sum() > 0:
+        print(f"⚠️ Removing {clopidogrel_mask.sum()} clopidogrel prescriptions that slipped through")
+        aspirins = aspirins[~clopidogrel_mask].copy()
     
     # Debug: Check what's being included
     print(f"\nDEBUG: Checking what drugs are being included...")
@@ -122,6 +135,79 @@ def find_aspirin_basic(gp_scripts):
         print(df['bnf_code'].head(10).tolist())
     
     return aspirins
+
+
+def find_clopidogrel_basic(gp_scripts):
+    """
+    Basic clopidogrel search for negative control experiment
+    Clopidogrel is an antiplatelet drug like aspirin but with different mechanism
+    and no known anti-CRC effects - perfect negative control
+    """
+    print("\n=== Basic Clopidogrel Search (Negative Control) ===\n")
+    
+    df = gp_scripts.copy()
+    
+    # Convert to strings safely
+    df['drug_name_str'] = df['drug_name'].astype(str)
+    df['bnf_code_str'] = df['bnf_code'].astype(str)
+    
+    # Search for clopidogrel keywords in drug names
+    clopidogrel_keywords = ['clopidogrel', 'plavix', 'clopilet', 'clopilet', 'clopidogrel']
+    
+    clopidogrel_mask = False
+    for keyword in clopidogrel_keywords:
+        keyword_mask = df['drug_name_str'].str.contains(keyword, case=False, na=False)
+        clopidogrel_mask = clopidogrel_mask | keyword_mask
+        if keyword_mask.sum() > 0:
+            print(f"Found {keyword_mask.sum()} prescriptions containing '{keyword}'")
+    
+    # Search for clopidogrel-specific BNF codes (2.9.3.1 - Clopidogrel specifically)
+    # Handle both formats: 02.09.03.01 and 02090301
+    bnf_patterns = ['02.09.03.01', '02090301']  # Clopidogrel specifically
+    bnf_mask = False
+    for pattern in bnf_patterns:
+        pattern_mask = df['bnf_code_str'].str.startswith(pattern, na=False)
+        bnf_mask = bnf_mask | pattern_mask
+        if pattern_mask.sum() > 0:
+            print(f"Found {pattern_mask.sum()} prescriptions with BNF pattern '{pattern}'")
+    
+    # Combine results
+    all_clopidogrel_mask = clopidogrel_mask | bnf_mask
+    clopidogrels = df[all_clopidogrel_mask].copy()
+    
+    # Debug: Check what's being included
+    print(f"\nDEBUG: Checking what drugs are being included...")
+    print(f"Clopidogrel mask matches: {clopidogrel_mask.sum()}")
+    print(f"BNF mask matches: {bnf_mask.sum()}")
+    print(f"Combined matches: {all_clopidogrel_mask.sum()}")
+    
+    print(f"\nTotal potential clopidogrel prescriptions: {len(clopidogrels)}")
+    
+    if len(clopidogrels) > 0:
+        print(f"Unique patients with clopidogrel: {clopidogrels['eid'].nunique()}")
+        
+        # Show sample
+        print(f"\nSample clopidogrel prescriptions:")
+        sample_cols = ['eid', 'issue_date', 'drug_name', 'bnf_code']
+        print(clopidogrels[sample_cols].head(10))
+        
+        # Most common clopidogrel drugs
+        print(f"\nMost common clopidogrel drugs:")
+        top_drugs = clopidogrels['drug_name'].value_counts().head(5)
+        for drug, count in top_drugs.items():
+            print(f"  {drug}: {count}")
+    
+    else:
+        print("No obvious clopidogrel found")
+        
+        # Show what we do have
+        print(f"\nSample of all drug names:")
+        print(df['drug_name'].head(10).tolist())
+        
+        print(f"\nSample of all BNF codes:")
+        print(df['bnf_code'].head(10).tolist())
+    
+    return clopidogrels
 
 def encode_smoking(status):
     """One-hot encoding: [Never, Previous, Current]"""
@@ -638,6 +724,440 @@ def aspirin_colorectal_analysis(gp_scripts=None, true_aspirins=None, processed_i
     
     print(f"   Successfully matched pairs: {len(matched_treated_indices):,}")
     
+    # COMPREHENSIVE INDEX ALIGNMENT CHECK
+    print("\n=== INDEX ALIGNMENT VERIFICATION ===")
+    
+    # Check that matched indices correspond to the right patients
+    print("Verifying index alignment between local and global arrays...")
+    
+    # For treated patients - just check first few and last few for verification
+    treated_index_alignment_ok = True
+    sample_size = min(5, len(matched_treated_indices))
+    
+    # Check first few
+    for i in range(sample_size):
+        local_eid = matched_treated_eids[i]
+        global_eid = processed_ids[matched_treated_indices[i]]
+        if local_eid != global_eid:
+            print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
+            treated_index_alignment_ok = False
+    
+    # Check last few
+    if len(matched_treated_indices) > sample_size:
+        for i in range(len(matched_treated_indices) - sample_size, len(matched_treated_indices)):
+            local_eid = matched_treated_eids[i]
+            global_eid = processed_ids[matched_treated_indices[i]]
+            if local_eid != global_eid:
+                print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
+                treated_index_alignment_ok = False
+    
+    # For control patients - same approach
+    control_index_alignment_ok = True
+    
+    # Check first few
+    for i in range(sample_size):
+        local_eid = matched_control_eids[i]
+        global_eid = processed_ids[matched_control_indices[i]]
+        if local_eid != global_eid:
+            print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
+            control_index_alignment_ok = False
+    
+    # Check last few
+    if len(matched_control_indices) > sample_size:
+        for i in range(len(matched_control_indices) - sample_size, len(matched_control_indices)):
+            local_eid = matched_control_eids[i]
+            global_eid = processed_ids[matched_control_indices[i]]
+            if local_eid != global_eid:
+                print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
+                control_index_alignment_ok = False
+    
+    if treated_index_alignment_ok and control_index_alignment_ok:
+        print(f"✅ All indices properly aligned between local and global arrays")
+        print(f"   Verified {sample_size} samples from start and end of {len(matched_treated_indices):,} matched pairs")
+    else:
+        print("❌ Index misalignment detected - this will cause incorrect results!")
+        return None
+    
+    # Check that treatment times correspond to the right patients
+    print("\nVerifying treatment time alignment...")
+    treatment_time_alignment_ok = True
+    
+    # Just check a sample of treatment times
+    sample_size = min(5, len(matched_treated_eids))
+    verified_count = 0
+    
+    for i in range(sample_size):
+        treated_eid = matched_treated_eids[i]
+        # Find this patient in the original treated lists
+        original_idx = None
+        for j, eid in enumerate(treated_eids):
+            if eid == treated_eid:
+                original_idx = j
+                break
+        
+        if original_idx is not None and original_idx < len(treated_times):
+            expected_time = treated_times[original_idx]
+            verified_count += 1
+        else:
+            print(f"❌ Treated {treated_eid}: Could not find treatment time!")
+            treatment_time_alignment_ok = False
+    
+    if treatment_time_alignment_ok:
+        print(f"✅ Treatment time alignment verified for {verified_count} sample patients")
+        print(f"   Sample treatment times: {[treated_times[i] for i in range(min(3, len(treated_times)))]}")
+    else:
+        print("❌ Treatment time misalignment - stopping analysis")
+        return None
+    
+    # Now proceed with outcome calculation using PROPERLY VERIFIED indices
+    print("\n=== OUTCOME CALCULATION WITH VERIFIED INDICES ===")
+    
+    # Step 7: Calculate outcomes and hazard ratio
+    print("\n7. Calculating outcomes and hazard ratio:")
+    
+    if Y is not None:
+        # Convert PyTorch tensor to numpy if needed
+        if hasattr(Y, 'detach'):
+            Y_np = Y.detach().cpu().numpy()
+        else:
+            Y_np = Y
+        
+        # Extract outcomes for matched cohorts
+        treated_outcomes = []
+        control_outcomes = []
+        follow_up_times = []
+        
+        # Track event timing for analysis
+        treated_event_times = []
+        control_event_times = []
+        treated_censoring_times = []
+        control_censoring_times = []
+        
+        # Get outcomes for treated patients
+        for treated_idx in matched_treated_indices:
+            treated_eid = processed_ids[treated_idx]
+            treatment_time = None
+            
+            # Find treatment time from the original treated times
+            for i, eid in enumerate(treated_eids):
+                if eid == treated_eid:
+                    treatment_time = treated_times[i]
+                    break
+            
+            if treatment_time is not None and treated_idx < Y_np.shape[0]:
+                # Look for colorectal cancer events after treatment time
+                if colorectal_cancer_indices is not None:
+                    # Colorectal cancer events - check if any of the specified events occurred
+                    post_treatment_outcomes = Y_np[treated_idx, colorectal_cancer_indices, int(treatment_time):]
+                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+                else:
+                    # If no specific event specified, use any event
+                    post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
+                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+                
+                event_occurred = np.any(post_treatment_outcomes > 0)
+                
+                if event_occurred:
+                    # Find time to first event
+                    event_times = np.where(post_treatment_outcomes > 0)[0]
+                    time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    treated_event_times.append(time_to_event)
+                else:
+                    # Censored at end of follow-up (minimum 5 years)
+                    time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+                    treated_censoring_times.append(time_to_event)
+                
+                treated_outcomes.append(int(event_occurred))
+                follow_up_times.append(time_to_event)
+        
+        # Get outcomes for control patients
+        for control_idx in matched_control_indices:
+            control_eid = processed_ids[control_idx]
+            
+            # For controls, use their age-based time point as "treatment" time
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                control_time = int(age_at_enroll - 30)  # Convert to time index
+                
+                if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
+                    # Look for colorectal cancer events after control time
+                    if colorectal_cancer_indices is not None:
+                        # Colorectal cancer events - check if any of the specified events occurred
+                        post_control_outcomes = Y_np[control_idx, colorectal_cancer_indices, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    else:
+                        # If no specific event specified, use any event
+                        post_control_outcomes = Y_np[control_idx, :, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    
+                    event_occurred = np.any(post_control_outcomes > 0)
+                    
+                    if event_occurred:
+                        # Find time to first event
+                        event_times = np.where(post_control_outcomes > 0)[0]
+                        time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                        control_event_times.append(time_to_event)
+                    else:
+                        # Censored at end of follow-up (minimum 5 years)
+                        time_to_event = min(5.0, Y_np.shape[2] - control_time)
+                        control_censoring_times.append(time_to_event)
+                    
+                    control_outcomes.append(int(event_occurred))
+                    follow_up_times.append(time_to_event)
+        
+        # ANALYZE EVENT TIMING DISTRIBUTIONS
+        print("\n=== EVENT TIMING ANALYSIS ===")
+        print("This will help explain why HR might be protective even with higher event rates")
+        
+        if len(treated_event_times) > 0 and len(control_event_times) > 0:
+            print(f"\nTreated patients with events: {len(treated_event_times):,}")
+            print(f"Control patients with events: {len(control_event_times):,}")
+            
+            # Event timing statistics
+            treated_event_mean = np.mean(treated_event_times)
+            control_event_mean = np.mean(control_event_times)
+            treated_event_median = np.median(treated_event_times)
+            control_event_median = np.median(control_event_times)
+            
+            print(f"\nEvent timing (years from index):")
+            print(f"  Treated:  Mean={treated_event_mean:.2f}, Median={treated_event_median:.2f}")
+            print(f"  Control:  Mean={control_event_mean:.2f}, Median={control_event_median:.2f}")
+            
+            # Test if treated events happen later (protective effect)
+            if treated_event_mean > control_event_mean:
+                timing_difference = treated_event_mean - control_event_mean
+                print(f"✅ Treated events happen {timing_difference:.2f} years LATER on average")
+                print(f"   This explains protective HR despite potentially higher event rates!")
+            else:
+                timing_difference = control_event_mean - treated_event_mean
+                print(f"⚠️ Treated events happen {timing_difference:.2f} years EARLIER on average")
+                print(f"   This would suggest harmful effect - investigate further!")
+            
+            # Censoring analysis
+            if len(treated_censoring_times) > 0 and len(control_censoring_times) > 0:
+                treated_censor_mean = np.mean(treated_censoring_times)
+                control_censor_mean = np.mean(control_censoring_times)
+                
+                print(f"\nCensoring times (years from index):")
+                print(f"  Treated:  Mean={treated_censor_mean:.2f}")
+                print(f"  Control:  Mean={control_censor_mean:.2f}")
+                
+                if treated_censor_mean > control_censor_mean:
+                    print(f"✅ Treated patients followed longer before censoring")
+                else:
+                    print(f"⚠️ Controls followed longer before censoring")
+            
+            # Event rate comparison
+            treated_event_rate = len(treated_event_times) / len(treated_outcomes) * 100
+            control_event_rate = len(control_event_times) / len(control_outcomes) * 100
+            
+            print(f"\nEvent rates:")
+            print(f"  Treated:  {treated_event_rate:.1f}% ({len(treated_event_times)}/{len(treated_outcomes)})")
+            print(f"  Control:  {control_event_rate:.1f}% ({len(control_event_times)}/{len(control_outcomes)})")
+            
+            if treated_event_rate > control_event_rate:
+                rate_difference = treated_event_rate - control_event_rate
+                print(f"⚠️ Treated event rate {rate_difference:.1f}% HIGHER than control")
+                print(f"   But if events happen later, this can still give protective HR!")
+            else:
+                rate_difference = control_event_rate - treated_event_rate
+                print(f"✅ Treated event rate {rate_difference:.1f}% LOWER than control")
+                print(f"   This directly supports protective effect")
+        
+        if len(treated_outcomes) > 10 and len(control_outcomes) > 10:
+            hr_results = calculate_hazard_ratio_colorectal(
+                np.array(treated_outcomes),
+                np.array(control_outcomes),
+                np.array(follow_up_times)
+            )
+            
+            print(f"   Treated colorectal cancer events: {np.sum(treated_outcomes):,}")
+            print(f"   Control colorectal cancer events: {np.sum(control_outcomes):,}")
+            print(f"   Total colorectal cancer events: {hr_results['total_events']:,}")
+            print()
+            
+            print("=== FINAL RESULTS (COLORECTAL CANCER PREVENTION) ===")
+            print(f"Hazard Ratio: {hr_results['hazard_ratio']:.3f}")
+            print(f"95% CI: {hr_results['hr_ci_lower']:.3f} - {hr_results['hr_ci_upper']:.3f}")
+            print(f"P-value: {hr_results['p_value']:.4f}")
+            print(f"Matched pairs: {hr_results['n_treated']:,}")
+            
+            # Interpret results for cancer prevention
+            if hr_results['hazard_ratio'] < 1.0:
+                risk_reduction = (1 - hr_results['hazard_ratio']) * 100
+                print(f"Risk reduction: {risk_reduction:.1f}%")
+            else:
+                risk_increase = (hr_results['hazard_ratio'] - 1) * 100
+                print(f"Risk increase: {risk_increase:.1f}%")
+            
+            # Compare to expected trial results
+            expected_hr = 0.75
+            hr_difference = hr_results['hazard_ratio'] - expected_hr
+            print(f"Expected HR from trials: {expected_hr:.3f}")
+            print(f"Difference from expected: {hr_difference:.3f}")
+            
+            # Check if results are consistent with trials
+            ci_overlaps_expected = (hr_results['hr_ci_lower'] <= expected_hr <= hr_results['hr_ci_upper'])
+            print(f"CI overlaps expected: {ci_overlaps_expected}")
+            print(f"Protective effect detected: {hr_results['protective_effect']}")
+            print(f"Validation passed: {ci_overlaps_expected and hr_results['p_value'] < 0.05}")
+            
+            # Return comprehensive results including matched patient IDs and treatment times
+            comprehensive_results = {
+                'hazard_ratio_results': hr_results,
+                'matched_patients': {
+                    'treated_eids': matched_treated_eids,
+                    'control_eids': matched_control_eids,
+                    'treated_indices': matched_treated_indices,
+                    'control_indices': matched_control_indices
+                },
+                'treatment_times': {
+                    'treated_times': [treated_times[i] for i, eid in enumerate(treated_eids) if eid in matched_treated_eids],
+                    'control_times': [control_t0s[i] for i, eid in enumerate(valid_control_eids) if eid in matched_control_eids]
+                },
+                'cohort_sizes': {
+                    'n_treated': len(matched_treated_eids),
+                    'n_control': len(matched_control_eids),
+                    'n_total': len(matched_treated_eids) + len(matched_control_eids)
+                },
+                'matching_features': {
+                    'treated_features': treated_features,
+                    'control_features': control_features,
+                    'feature_names': ['signatures'] + ['age', 'sex', 'dm2', 'antihtn', 'dm1', 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'sbp', 'pce_goff', 'smoke_never', 'smoke_previous', 'smoke_current']
+                }
+            }
+            
+            return comprehensive_results
+        else:
+            print("   Insufficient outcome data for HR calculation")
+            return None
+    else:
+        print("   No outcomes (Y) found - cannot calculate HR")
+        return None
+
+def clopidogrel_colorectal_analysis(gp_scripts=None, true_clopidogrels=None, processed_ids=None, 
+                                   thetas=None, sig_indices=None, covariate_dicts=None, Y=None, 
+                                   colorectal_cancer_indices=None, cov=None):
+    """
+    Clopidogrel-colorectal cancer analysis as NEGATIVE CONTROL
+    
+    This is a perfect negative control because:
+    1. Clopidogrel is an antiplatelet drug like aspirin (same patient population)
+    2. But works through P2Y12 receptor inhibition (different mechanism)
+    3. No known anti-CRC effects
+    4. Should show HR ≈ 1.0 (null effect) or potentially harmful
+    
+    Expected result: HR ≈ 1.0 (no effect) or HR > 1.0 (harmful)
+    If we see HR < 1.0 (protective), that suggests confounding or bias
+    
+    Parameters: Same as aspirin analysis
+    Returns: Same structure for plotting compatibility
+    """
+    
+    print("=== CLOPIDOGREL-COLORECTAL CANCER ANALYSIS (NEGATIVE CONTROL) ===")
+    print("Expected effect: Clopidogrel should have NO effect on CRC (HR ≈ 1.0)")
+    print("If HR < 1.0, this suggests confounding or bias in our analysis!")
+    
+    # Step 1: Verify patient cohorts are properly defined
+    print("\n1. Verifying patient cohort definitions:")
+    cohort_ok = verify_patient_cohorts_aspirin(gp_scripts, true_clopidogrels, processed_ids)
+    if not cohort_ok:
+        print("❌ Cohort definition failed - stopping analysis")
+        return None
+    
+    # Step 2: Extract treated patients using ObservationalTreatmentPatternLearner
+    print("\n2. Extracting treated patients using ObservationalTreatmentPatternLearner:")
+    from scripts.observational_treatment_patterns import ObservationalTreatmentPatternLearner
+    
+    learner = ObservationalTreatmentPatternLearner(
+        signature_loadings=thetas,
+        processed_ids=processed_ids, 
+        statin_prescriptions=true_clopidogrels,  # Reuse statin logic for clopidogrel
+        covariates=cov,
+        gp_scripts=gp_scripts
+    )
+    
+    treated_eids = learner.treatment_patterns['treated_patients']
+    treated_times = learner.treatment_patterns['treatment_times']
+    never_treated_eids = learner.treatment_patterns['never_treated']
+    
+    print(f"   Treated patients from learner: {len(treated_eids):,}")
+    print(f"   Never-treated patients from learner: {len(never_treated_eids):,}")
+    
+    # VERIFY: Check that treated patients actually have clopidogrel
+    treated_ok = verify_treated_patients_actually_have_aspirin(treated_eids, true_clopidogrels)
+    if not treated_ok:
+        print("❌ Treated patient verification failed - stopping analysis")
+        return None
+    
+    # Step 3: Define clean controls
+    print("\n3. Defining clean controls:")
+    if gp_scripts is not None:
+        all_patients_with_prescriptions = set(gp_scripts['eid'].unique())
+    else:
+        all_patients_with_prescriptions = set(true_clopidogrels['eid'].unique())
+    
+    # Use clean control definition: all GP patients minus ALL clopidogrel users
+    all_clopidogrel_eids = set(true_clopidogrels['eid'].unique())
+    valid_never_treated = [eid for eid in all_patients_with_prescriptions 
+                      if eid not in all_clopidogrel_eids and eid in processed_ids]
+    
+    print(f"   Found {len(valid_never_treated)} never-treated patients with signature data")
+    
+    # VERIFY: Check that controls don't have clopidogrel
+    control_ok = verify_controls_are_clean_aspirin(valid_never_treated, true_clopidogrels)
+    if not control_ok:
+        print("❌ Control verification failed - stopping analysis")
+        return None
+    
+    # Use the same control selection logic
+    control_eids_for_matching = valid_never_treated[:len(treated_eids)*2]  # 2:1 ratio
+    control_t0s = []
+    valid_control_eids = []
+    
+    for eid in control_eids_for_matching:
+        try:
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                # Convert age to time index (age - 30, since time grid starts at age 30)
+                t0 = int(age_at_enroll - 30)
+                # Only require t0 >= 10 for controls
+                if t0 >= 10:
+                    control_t0s.append(t0)
+                    valid_control_eids.append(eid)
+        except:
+            continue
+    
+    print(f"   Control patients with 10-year follow-up: {len(valid_control_eids):,}")
+    
+    # Step 4: Build features for treated patients
+    print("\n4. Building features for treated patients:")
+    treated_features, treated_indices, treated_eids_matched = build_features_aspirin(
+        treated_eids, treated_times, processed_ids, thetas, 
+        covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times
+    )
+    
+    print(f"   Treated patients after exclusions: {len(treated_features):,}")
+    
+    # Step 5: Build features for control patients
+    print("\n5. Building features for control patients:")
+    control_features, control_indices, control_eids_matched = build_features_aspirin(
+        valid_control_eids, control_t0s, processed_ids, 
+        thetas, covariate_dicts, sig_indices=sig_indices, is_treated=False, treatment_dates=None
+    )
+    
+    print(f"   Control patients after exclusions: {len(control_features):,}")
+    
+    # Step 6: Perform nearest neighbor matching
+    print("\n6. Performing nearest neighbor matching:")
+    (matched_treated_indices, matched_control_indices, 
+     matched_treated_eids, matched_control_eids) = perform_nearest_neighbor_matching(
+        treated_features, control_features, treated_indices, control_indices,
+        treated_eids_matched, control_eids_matched
+    )
+    
+    print(f"   Successfully matched pairs: {len(matched_treated_indices):,}")
+    
     # Step 7: Calculate outcomes and hazard ratio
     print("\n7. Calculating outcomes and hazard ratio:")
     
@@ -728,39 +1248,35 @@ def aspirin_colorectal_analysis(gp_scripts=None, true_aspirins=None, processed_i
                 np.array(follow_up_times)
             )
             
-            print(f"   Treated colorectal cancer events: {np.sum(treated_outcomes):,}")
-            print(f"   Control colorectal cancer events: {np.sum(control_outcomes):,}")
-            print(f"   Total colorectal cancer events: {hr_results['total_events']:,}")
+            print(f"   Treated CRC events: {np.sum(treated_outcomes):,}")
+            print(f"   Control CRC events: {np.sum(control_outcomes):,}")
+            print(f"   Total CRC events: {hr_results['total_events']:,}")
             print()
             
-            print("=== FINAL RESULTS (COLORECTAL CANCER PREVENTION) ===")
+            print("=== FINAL RESULTS (CLOPIDOGREL NEGATIVE CONTROL) ===")
             print(f"Hazard Ratio: {hr_results['hazard_ratio']:.3f}")
             print(f"95% CI: {hr_results['hr_ci_lower']:.3f} - {hr_results['hr_ci_upper']:.3f}")
             print(f"P-value: {hr_results['p_value']:.4f}")
             print(f"Matched pairs: {hr_results['n_treated']:,}")
             
-            # Interpret results for cancer prevention
+            # Interpret results for negative control
             if hr_results['hazard_ratio'] < 1.0:
                 risk_reduction = (1 - hr_results['hazard_ratio']) * 100
                 print(f"Risk reduction: {risk_reduction:.1f}%")
+                print(f"⚠️  WARNING: This suggests confounding or bias!")
+                print(f"   Clopidogrel should have NO effect on CRC")
             else:
                 risk_increase = (hr_results['hazard_ratio'] - 1) * 100
                 print(f"Risk increase: {risk_increase:.1f}%")
+                print(f"✅ This is more consistent with expected null effect")
             
-            # Compare to expected trial results
-            expected_hr = 0.75
-            hr_difference = hr_results['hazard_ratio'] - expected_hr
-            print(f"Expected HR from trials: {expected_hr:.3f}")
-            print(f"Difference from expected: {hr_difference:.3f}")
+            # Check if results are consistent with null effect
+            hr_close_to_null = 0.8 <= hr_results['hazard_ratio'] <= 1.2
+            print(f"HR close to null (0.8-1.2): {hr_close_to_null}")
+            print(f"Negative control validation: {'PASSED' if hr_close_to_null else 'FAILED'}")
             
-            # Check if results are consistent with trials
-            ci_overlaps_expected = (hr_results['hr_ci_lower'] <= expected_hr <= hr_results['hr_ci_upper'])
-            print(f"CI overlaps expected: {ci_overlaps_expected}")
-            print(f"Protective effect detected: {hr_results['protective_effect']}")
-            print(f"Validation passed: {ci_overlaps_expected and hr_results['p_value'] < 0.05}")
-            
-            # Return comprehensive results including matched patient IDs and treatment times
-            comprehensive_results = {
+            # Return results in the format expected by plotting functions
+            final_results = {
                 'hazard_ratio_results': hr_results,
                 'matched_patients': {
                     'treated_eids': matched_treated_eids,
@@ -768,23 +1284,12 @@ def aspirin_colorectal_analysis(gp_scripts=None, true_aspirins=None, processed_i
                     'treated_indices': matched_treated_indices,
                     'control_indices': matched_control_indices
                 },
-                'treatment_times': {
-                    'treated_times': [treated_times[i] for i, eid in enumerate(treated_eids) if eid in matched_treated_eids],
-                    'control_times': [control_t0s[i] for i, eid in enumerate(valid_control_eids) if eid in matched_control_eids]
-                },
-                'cohort_sizes': {
-                    'n_treated': len(matched_treated_eids),
-                    'n_control': len(matched_control_eids),
-                    'n_total': len(matched_treated_eids) + len(matched_control_eids)
-                },
-                'matching_features': {
-                    'treated_features': treated_features,
-                    'control_features': control_features,
-                    'feature_names': ['signatures'] + ['age', 'sex', 'dm2', 'antihtn', 'dm1', 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'sbp', 'pce_goff', 'smoke_never', 'smoke_previous', 'smoke_current']
-                }
+                'treatment_times': treated_times,
+                'n_treated': len(matched_treated_eids),
+                'n_control': len(matched_control_eids)
             }
             
-            return comprehensive_results
+            return final_results
         else:
             print("   Insufficient outcome data for HR calculation")
             return None
