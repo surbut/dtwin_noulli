@@ -3,6 +3,465 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
+
+
+
+
+
+def encode_smoking(status):
+    """One-hot encoding: [Never, Previous, Current]"""
+    if status == "Never":
+        return [1, 0, 0]
+    elif status == "Previous":
+        return [0, 1, 0]
+    elif status == "Current":
+        return [0, 0, 1]
+    else:
+        return [0, 0, 0]  # For missing/unknown
+
+def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indices=None, 
+                  is_treated=False, treatment_dates=None, Y=None, event_indices=None):
+    """
+    Build feature vectors for matching with proper exclusions and imputation
+    
+    Parameters:
+    - eids: List of patient IDs
+    - t0s: List of time indices for each patient
+    - processed_ids: Array of all processed patient IDs
+    - thetas: Signature loadings (N x K x T)
+    - covariate_dicts: Dictionary with covariate data
+    - sig_indices: Optional list of signature indices to use
+    - is_treated: Whether these are treated patients
+    - treatment_dates: Treatment dates for treated patients
+    - Y: Optional outcome tensor for pre-treatment event exclusion
+    - event_indices: Optional list of event indices for exclusion
+    
+    Returns:
+    - features: Feature matrix for matching
+    - indices: Patient indices in thetas
+    - kept_eids: Successfully matched patient IDs
+    """
+    features = []
+    indices = []
+    kept_eids = []
+    window = 10  # 10 years of signature history
+    n_signatures = thetas.shape[1]
+    if sig_indices is None:
+        sig_indices = list(range(n_signatures))  # Use ALL signatures
+    expected_length = len(sig_indices) * window
+    
+    # Calculate means for imputation
+    ldl_values = [v for v in covariate_dicts.get('ldl_prs', {}).values() if v is not None and not np.isnan(v)]
+    hdl_values = [v for v in covariate_dicts.get('hdl', {}).values() if v is not None and not np.isnan(v)]
+    tchol_values = [v for v in covariate_dicts.get('tchol', {}).values() if v is not None and not np.isnan(v)]
+    sbp_values = [v for v in covariate_dicts.get('SBP', {}).values() if v is not None and not np.isnan(v)]
+    
+    ldl_mean = np.mean(ldl_values) if ldl_values else 0
+    hdl_mean = np.mean(hdl_values) if hdl_values else 50
+    tchol_mean = np.mean(tchol_values) if tchol_values else 200
+    sbp_mean = np.mean(sbp_values) if sbp_values else 140
+    
+    print(f"Processing {len(eids)} patients with sig_indices={sig_indices}")
+    
+    # Exclusion counters
+    excluded_pre_events = 0
+    excluded_other = 0
+    
+    for i, (eid, t0) in enumerate(zip(eids, t0s)):
+        if i % 1000 == 0:
+            print(f"Processed {i} patients, kept {len(features)} so far")
+            
+        try:
+            idx = np.where(processed_ids == int(eid))[0][0]
+        except Exception:
+            excluded_other += 1
+            continue
+            
+        if t0 < window:
+            excluded_other += 1
+            continue  # Not enough history
+            
+        t0_int = int(t0)
+        sig_traj = thetas[idx, sig_indices, t0_int-window:t0_int].flatten()
+        
+        if sig_traj.shape[0] != expected_length:
+            excluded_other += 1
+            continue  # Skip if not the right length
+        
+        # Check for NaN in signature trajectory
+        if np.any(np.isnan(sig_traj)):
+            excluded_other += 1
+            continue  # Skip if signature has NaN values
+        
+        # NEW: Check for ASCVD events before index date (if Y is available)
+        if Y is not None and event_indices is not None:
+            # Find this patient in Y tensor
+            y_idx = np.where(processed_ids == int(eid))[0][0]
+            
+            if is_treated and treatment_dates is not None:
+                # For treated patients: check events before treatment time
+                treatment_idx = eids.index(eid) if eid in eids else None
+                if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                    treatment_time = int(treatment_dates[treatment_idx])
+                    pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
+                    # Convert PyTorch tensor to NumPy if needed
+                    if hasattr(pre_treatment_events, 'detach'):
+                        pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
+                    if np.any(pre_treatment_events > 0):
+                        excluded_pre_events += 1
+                        continue  # Skip - had events before treatment
+                    
+                    # CRITICAL: Also exclude events within 1 year AFTER treatment (reverse causation)
+                    post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
+                    if hasattr(post_treatment_1yr, 'detach'):
+                        post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
+                    if np.any(post_treatment_1yr > 0):
+                        excluded_pre_events += 1
+                        continue  # Skip - had events within 1 year of treatment
+            else:
+                # For control patients: check events before enrollment time
+                pre_enrollment_events = Y[y_idx, event_indices, :t0]
+                # Convert PyTorch tensor to NumPy if needed
+                if hasattr(pre_enrollment_events, 'detach'):
+                    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
+                if np.any(pre_enrollment_events > 0):
+                    excluded_pre_events += 1
+                    continue  # Skip - had events before enrollment
+                    
+                # CRITICAL: Also exclude events within 1 year AFTER enrollment (reverse causation)
+                post_enrollment_1yr = Y[y_idx, event_indices, t0:min(t0 + 1, Y.shape[2])]
+                if hasattr(post_enrollment_1yr, 'detach'):
+                    post_enrollment_1yr = post_enrollment_1yr.detach().cpu().numpy()
+                if np.any(post_enrollment_1yr > 0):
+                    excluded_pre_events += 1
+                    continue  # Skip - had events within 1 year of enrollment
+        
+        # Extract covariates with proper handling
+        age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
+        if np.isnan(age_at_enroll) or age_at_enroll is None:
+            age_at_enroll = 57  # Fallback age
+            
+        # Determine the correct age for matching based on index date
+        if is_treated and treatment_dates is not None:
+            # For treated patients: use treatment age as index date
+            treatment_idx = eids.index(eid) if eid in eids else None
+            if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
+                age = treatment_age  # Use treatment age for matching
+            else:
+                age = age_at_enroll
+        else:
+            # For control patients: use enrollment age as index date
+            age = age_at_enroll
+            
+        sex = covariate_dicts['sex'].get(int(eid), 0)
+        if np.isnan(sex) or sex is None:
+            sex = 0
+        sex = int(sex)
+        
+        # EXCLUDE if missing binary variables
+        dm2 = covariate_dicts['dm2_prev'].get(int(eid))
+        if dm2 is None or np.isnan(dm2):
+            excluded_other += 1
+            continue  # Skip this patient
+            
+        antihtn = covariate_dicts['antihtnbase'].get(int(eid))
+        if antihtn is None or np.isnan(antihtn):
+            excluded_other += 1
+            continue  # Skip this patient
+            
+        dm1 = covariate_dicts['dm1_prev'].get(int(eid))
+        if dm1 is None or np.isnan(dm1):
+            excluded_other += 1
+            continue  # Skip this patient
+        
+        # EXCLUDE patients with CAD before treatment/enrollment (incident user logic)
+        # Determine the reference age for CAD exclusion
+        if is_treated and treatment_dates is not None:
+            # For treated patients: use first statin prescription date
+            treatment_idx = eids.index(eid) if eid in eids else None
+            if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
+                reference_age = treatment_age
+            else:
+                reference_age = age_at_enroll
+        else:
+            # For control patients: use enrollment date
+            reference_age = age_at_enroll
+        
+        # Check CAD exclusion (only exclude CAD before index date)
+        cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
+        cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
+        if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
+            if cad_censor_age < reference_age:
+                excluded_other += 1
+                continue  # Skip this patient
+        
+        # Check for missing DM/HTN/HyperLip status (exclude if unknown)
+        dm_any = covariate_dicts.get('Dm_Any', {}).get(int(eid))
+        if dm_any is None or np.isnan(dm_any):
+            excluded_other += 1
+            continue  # Skip this patient
+            
+        ht_any = covariate_dicts.get('Ht_Any', {}).get(int(eid))
+        if ht_any is None or np.isnan(ht_any):
+            excluded_other += 1
+            continue  # Skip this patient
+            
+        hyperlip_any = covariate_dicts.get('HyperLip_Any', {}).get(int(eid))
+        if hyperlip_any is None or np.isnan(hyperlip_any):
+            excluded_other += 1
+            continue  # Skip this patient
+        
+        # IMPUTE quantitative variables with mean
+        ldl_prs = covariate_dicts.get('ldl_prs', {}).get(int(eid))
+        if np.isnan(ldl_prs) or ldl_prs is None:
+            ldl_prs = ldl_mean
+            
+        hdl = covariate_dicts.get('hdl', {}).get(int(eid))
+        if np.isnan(hdl) or hdl is None:
+            hdl = hdl_mean
+            
+        tchol = covariate_dicts.get('tchol', {}).get(int(eid))
+        if np.isnan(tchol) or tchol is None:
+            tchol = tchol_mean
+            
+        sbp = covariate_dicts.get('SBP', {}).get(int(eid))
+        if np.isnan(sbp) or sbp is None:
+            sbp = sbp_mean
+        
+        pce_goff = covariate_dicts.get('pce_goff', {}).get(int(eid), 0.09)
+        if np.isnan(pce_goff) or pce_goff is None:
+            pce_goff = 0.09
+        
+        cad_prs = covariate_dicts.get('cad_prs', {}).get(int(eid), 0)
+        if np.isnan(cad_prs) or cad_prs is None:
+            cad_prs = 0
+        
+        # Extract smoking status and encode
+        smoke = encode_smoking(covariate_dicts.get('smoke', {}).get(int(eid), None))
+        if np.any(np.isnan(smoke)):
+            smoke = [0, 0, 0]  # Default to "Never" smoking
+        
+        # Create feature vector: [signatures, age, sex] - clean and simple
+        feature_vector = np.concatenate([
+            sig_traj, [age, sex]
+        ])
+        
+        if np.any(np.isnan(feature_vector)):
+            excluded_other += 1
+            continue
+        
+        features.append(feature_vector)
+        indices.append(idx)
+        kept_eids.append(eid)
+    
+    print(f"Final result: {len(features)} patients kept out of {len(eids)}")
+    print(f"Excluded {excluded_pre_events} patients with pre-treatment/enrollment events")
+    print(f"Excluded {excluded_other} patients for other reasons")
+    
+    if len(features) == 0:
+        print("Warning: No valid features found after filtering")
+        return np.array([]), [], []
+    
+    return np.array(features), indices, kept_eids
+
+
+
+
+
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import euclidean_distances
+from scipy.optimize import linear_sum_assignment
+import time
+
+def perform_matching_fast(treated_features, control_features, treated_eids, control_eids,
+                         treated_indices, control_indices, method='nearest'):
+    """
+    Fast matching implementation with multiple methods
+    """
+    
+    if method == 'nearest':
+        # Original nearest neighbor (allows repetition)
+        scaler = StandardScaler()
+        treated_features_std = scaler.fit_transform(treated_features)
+        control_features_std = scaler.transform(control_features)
+        
+        # Perform nearest neighbor matching
+        nn = NearestNeighbors(n_neighbors=1, algorithm='auto').fit(control_features_std)
+        distances, indices = nn.kneighbors(treated_features_std)
+        
+        # Extract matched pairs
+        matched_control_indices = [control_indices[i] for i in indices.flatten()]
+        matched_treated_indices = treated_indices
+        matched_control_eids = [control_eids[i] for i in indices.flatten()]
+        matched_treated_eids = treated_eids
+        
+        return (matched_treated_indices, matched_control_indices, 
+                matched_treated_eids, matched_control_eids)
+            
+    elif method == 'hungarian':
+        # Hungarian algorithm for optimal assignment (no repetition)
+        scaler = StandardScaler()
+        treated_scaled = scaler.fit_transform(treated_features)
+        control_scaled = scaler.transform(control_features)
+        
+        # Compute distance matrix
+        distance_matrix = euclidean_distances(treated_scaled, control_scaled)
+        
+        # Hungarian algorithm
+        treated_idx, control_idx = linear_sum_assignment(distance_matrix)
+        
+        matched_treated_indices = [treated_indices[i] for i in treated_idx]
+        matched_control_indices = [control_indices[i] for i in control_idx]
+        matched_treated_eids = [treated_eids[i] for i in treated_idx]
+        matched_control_eids = [control_eids[i] for i in control_idx]
+        
+        return (matched_treated_indices, matched_control_indices, 
+                matched_treated_eids, matched_control_eids)
+        
+    elif method == 'greedy_vectorized':
+        # Fast greedy using vectorized operations
+        scaler = StandardScaler()
+        treated_scaled = scaler.fit_transform(treated_features)
+        control_scaled = scaler.transform(control_features)
+        
+        matched_treated_indices = []
+        matched_control_indices = []
+        matched_treated_eids = []
+        matched_control_eids = []
+        
+        # Keep track of available controls
+        available_controls = np.arange(len(control_scaled))
+        available_control_features = control_scaled.copy()
+        
+        for i, treated_feat in enumerate(treated_scaled):
+            if len(available_controls) == 0:
+                break
+                
+            # Vectorized distance calculation
+            distances = np.linalg.norm(available_control_features - treated_feat, axis=1)
+            best_idx = np.argmin(distances)
+            best_control = available_controls[best_idx]
+            
+            matched_treated_indices.append(treated_indices[i])
+            matched_control_indices.append(control_indices[best_control])
+            matched_treated_eids.append(treated_eids[i])
+            matched_control_eids.append(control_eids[best_control])
+            
+            # Remove the matched control
+            mask = np.arange(len(available_controls)) != best_idx
+            available_controls = available_controls[mask]
+            available_control_features = available_control_features[mask]
+        
+        return (matched_treated_indices, matched_control_indices, 
+                matched_treated_eids, matched_control_eids)
+            
+    elif method == 'kd_tree_greedy':
+        # Use KD-tree for faster nearest neighbor search in greedy
+        scaler = StandardScaler()
+        treated_scaled = scaler.fit_transform(treated_features)
+        control_scaled = scaler.transform(control_features)
+        
+        matched_treated_indices = []
+        matched_control_indices = []
+        matched_treated_eids = []
+        matched_control_eids = []
+        
+        # Available controls
+        available_indices = list(range(len(control_scaled)))
+        available_features = control_scaled.copy()
+        
+        for i, treated_feat in enumerate(treated_scaled):
+            if len(available_indices) == 0:
+                break
+                
+            # Build KD-tree for current available controls
+            nbrs = NearestNeighbors(n_neighbors=1, algorithm='kd_tree')
+            nbrs.fit(available_features)
+            
+            # Find nearest neighbor
+            distances, indices = nbrs.kneighbors([treated_feat])
+            best_local_idx = indices[0][0]
+            best_control_idx = available_indices[best_local_idx]
+            
+            matched_treated_indices.append(treated_indices[i])
+            matched_control_indices.append(control_indices[best_control_idx])
+            matched_treated_eids.append(treated_eids[i])
+            matched_control_eids.append(control_eids[best_control_idx])
+            
+            # Remove the matched control
+            available_indices.pop(best_local_idx)
+            available_features = np.delete(available_features, best_local_idx, axis=0)
+        
+        return (matched_treated_indices, matched_control_indices, 
+                matched_treated_eids, matched_control_eids)
+    
+    elif method == 'batch_greedy':
+        # Process in batches for memory efficiency
+        scaler = StandardScaler()
+        treated_scaled = scaler.fit_transform(treated_features)
+        control_scaled = scaler.transform(control_features)
+        
+        matched_treated_indices = []
+        matched_control_indices = []
+        matched_treated_eids = []
+        matched_control_eids = []
+        used_controls = set()
+        
+        batch_size = 1000  # Process 1000 treated at a time
+        
+        for batch_start in range(0, len(treated_scaled), batch_size):
+            batch_end = min(batch_start + batch_size, len(treated_scaled))
+            treated_batch = treated_scaled[batch_start:batch_end]
+            
+            # Get available controls
+            available_controls = [i for i in range(len(control_scaled)) if i not in used_controls]
+            if len(available_controls) == 0:
+                break
+                
+            available_features = control_scaled[available_controls]
+            
+            # Compute distances for entire batch
+            distances = euclidean_distances(treated_batch, available_features)
+            
+            # Greedy assignment within batch
+            for i, dist_row in enumerate(distances):
+                if len(available_controls) == 0:
+                    break
+                    
+                # Find best available match
+                best_local_idx = np.argmin(dist_row)
+                best_control_idx = available_controls[best_local_idx]
+                
+                actual_treated_idx = batch_start + i
+                matched_treated_indices.append(treated_indices[actual_treated_idx])
+                matched_control_indices.append(control_indices[best_control_idx])
+                matched_treated_eids.append(treated_eids[actual_treated_idx])
+                matched_control_eids.append(control_eids[best_control_idx])
+                
+                # Remove from available
+                used_controls.add(best_control_idx)
+                available_controls.remove(best_control_idx)
+                
+                # Update distance row to ignore this control
+                dist_row[best_local_idx] = np.inf
+        
+        return (matched_treated_indices, matched_control_indices, 
+                matched_treated_eids, matched_control_eids)
+    
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    print(f"Matched {len(matched_treated_indices)} pairs using {method} method")
+    return (matched_treated_indices, matched_control_indices, 
+            matched_treated_eids, matched_control_eids)
+
+
 def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, sig_indices, 
                             covariate_dicts, Y=None, event_indices=None, cov=None):
     """
@@ -116,9 +575,9 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Perform matching
     print("5. Performing matching...")
-    matched_treated, matched_controls, matched_pairs = perform_matching(
+    matched_treated, matched_controls, matched_pairs = perform_matching_fast(
         treated_features, control_features, kept_treated_eids, kept_control_eids,
-        treated_indices, control_indices, method='nearest'
+        treated_indices, control_indices, method='greedy_vectorized'
     )
     
     if len(matched_pairs) == 0:
