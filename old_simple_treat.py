@@ -140,8 +140,8 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         
   
 
-
-                    # Extract covariates with proper handling
+        
+        # Extract covariates with proper handling
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         if np.isnan(age_at_enroll) or age_at_enroll is None:
             age_at_enroll = 57  # Fallback age
@@ -444,19 +444,19 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Use ObservationalTreatmentPatternLearner if available
     try:
-        from scripts.observational_treatment_patterns import ObservationalTreatmentPatternLearner
-        
+    from scripts.observational_treatment_patterns import ObservationalTreatmentPatternLearner
+    
         # Check if we have the required data for OTPL
         if 'cov' in locals() and cov is not None:
             print("   Setting up OTPL...")
             otpl = ObservationalTreatmentPatternLearner(
-                signature_loadings=thetas,
-                processed_ids=processed_ids,
-                statin_prescriptions=true_statins,
-                covariates=cov,
-                gp_scripts=gp_scripts
-            )
-
+        signature_loadings=thetas,
+        processed_ids=processed_ids, 
+        statin_prescriptions=true_statins,
+        covariates=cov,
+        gp_scripts=gp_scripts
+    )
+    
             print("   Getting treatment patterns from OTPL...")
             # Get the treatment patterns from the OTPL
             patterns = otpl.treatment_patterns
@@ -469,26 +469,26 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
   
             print(f"   Extracted {len(treated_eids)} treated patients and {len(control_eids)} control patients")
             print(f"   Treated treatment times range: {min(treated_treatment_times)} to {max(treated_treatment_times)}")
-        else:
+    else:
             raise ValueError("Covariates not available for OTPL")
         
 
         # Now calculate control timing once for both paths
         print("   Calculating control timing...")
-        control_t0s = []
-        valid_control_eids = []
-        
+    control_t0s = []
+    valid_control_eids = []
+    
         for eid in control_eids:
-            try:
-                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
-                if age_at_enroll is not None and not np.isnan(age_at_enroll):
-                    t0 = int(age_at_enroll - 30)
-                    if t0 >= 10:
-                        control_t0s.append(t0)
-                        valid_control_eids.append(eid)
-            except:
-                continue
-        
+        try:
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                t0 = int(age_at_enroll - 30)
+                if t0 >= 10:
+                    control_t0s.append(t0)
+                    valid_control_eids.append(eid)
+        except:
+            continue
+    
         control_eids = valid_control_eids
         print(f"   Control patients with valid timing: {len(control_eids)}")
         if len(control_eids) > 0:
@@ -584,15 +584,15 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             idx = treated_eids.index(eid)
             if idx < len(treated_treatment_times):
                 matched_treatment_times.append(treated_treatment_times[idx])
-            else:
-                matched_treatment_times.append(0)
         else:
+                matched_treatment_times.append(0)
+    else:
             matched_treatment_times.append(0)
     
     # Extract outcomes for treated patients
-    treated_outcomes = []
-    treated_event_times = []
-    treated_censoring_times = []
+        treated_outcomes = []
+        treated_event_times = []
+        treated_censoring_times = []
     follow_up_times = []
     
     print(f" DEBUG: Processing {len(matched_treated_eids)} matched treated patients for outcomes")
@@ -614,14 +614,14 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         # Check for events within 5-year window ONLY
         post_treatment_outcomes_5yr = post_treatment_outcomes[:5]  # Only first 5 years
         event_occurred = np.any(post_treatment_outcomes_5yr > 0)
-        
-        if event_occurred:
+                
+                if event_occurred:
             # Find time to first event within 5 years
             event_times = np.where(post_treatment_outcomes_5yr > 0)[0]
             if len(event_times) > 0 and event_times[0] < 5:
                 time_to_event = event_times[0]
-                treated_event_times.append(time_to_event)
-            else:
+                    treated_event_times.append(time_to_event)
+                else:
                 # Event happened after 5 years - censor at 5 years
                 time_to_event = 5.0
                 treated_censoring_times.append(time_to_event)
@@ -629,11 +629,11 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         else:
             # Censored at 5 years (no events within 5 years)
             time_to_event = 5.0
-            treated_censoring_times.append(time_to_event)
+                    treated_censoring_times.append(time_to_event)
+                
+                treated_outcomes.append(int(event_occurred))
+                follow_up_times.append(time_to_event)
         
-        treated_outcomes.append(int(event_occurred))
-        follow_up_times.append(time_to_event)
-    
     # Extract outcomes for control patients
     control_outcomes = []
     control_event_times = []
@@ -662,14 +662,14 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         # Check for events within 5-year window ONLY
         post_enrollment_outcomes_5yr = post_enrollment_outcomes[:5]  # Only first 5 years
         event_occurred = np.any(post_enrollment_outcomes_5yr > 0)
-        
-        if event_occurred:
+                    
+                    if event_occurred:
             # Find time to first event within 5 years
             event_times = np.where(post_enrollment_outcomes_5yr > 0)[0]
             if len(event_times) > 0 and event_times[0] < 5:
                 time_to_event = event_times[0]
-                control_event_times.append(time_to_event)
-            else:
+                        control_event_times.append(time_to_event)
+                    else:
                 # Event happened after 5 years - censor at 5 years
                 time_to_event = 5.0
                 control_censoring_times.append(time_to_event)
@@ -677,11 +677,11 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         else:
             # Censored at 5 years (no events within 5 years)
             time_to_event = 5.0
-            control_censoring_times.append(time_to_event)
+                        control_censoring_times.append(time_to_event)
+                    
+                    control_outcomes.append(int(event_occurred))
+                    follow_up_times.append(time_to_event)
         
-        control_outcomes.append(int(event_occurred))
-        follow_up_times.append(time_to_event)
-    
     # VERIFICATION: Check covariate balance after matching
     print("7. Assessing covariate balance after matching...")
     if len(matched_pairs) > 0:
@@ -707,7 +707,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         
         if age_improvement > 0:
             print(f"   ✅ Age balance improved by {age_improvement:.1f} years")
-        else:
+            else:
             print(f"   ⚠️ Age balance worsened by {abs(age_improvement):.1f} years")
             
         if sex_improvement > 0:
@@ -738,7 +738,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     if final_control_statin_check > 0:
         print(f"   ❌ CRITICAL ERROR: {final_control_statin_check} matched controls have statin prescriptions!")
         print("   This indicates a fundamental flaw in control group definition!")
-    else:
+                else:
         print("   ✅ No statin contamination in final matched control group")
     
     # 2. Check for pre-treatment/enrollment events in final matched groups
@@ -777,7 +777,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
                 control_pre_events_final += 1
             
             # Check events within 1 year after enrollment
-            post_enrollment_1yr = Y[y_idx, event_indices, control_t0:min(control_t0 + 1, Y.shape[2])]
+            post_enrollment_1yr = Y[y_idx, event_indices, control_t0:min(control_t0, Y.shape[2])]
             if hasattr(post_enrollment_1yr, 'detach'):
                 post_enrollment_1yr = post_enrollment_1yr.detach().cpu().numpy()
             if np.any(post_enrollment_1yr > 0):
@@ -790,7 +790,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         
         if treated_pre_events_final > 0 or control_pre_events_final > 0:
             print("   ❌ FAILED: Pre-index events found in final matched groups!")
-        else:
+            else:
             print("   ✅ PASSED: No pre-index events in final matched groups")
             
         if treated_1yr_events_final > 0 or control_1yr_events_final > 0:
@@ -930,22 +930,22 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Prepare results
     results = {
-        'hazard_ratio_results': hr_results,
-        'matched_patients': {
-            'treated_eids': matched_treated_eids,
-            'control_eids': matched_control_eids,
+                'hazard_ratio_results': hr_results,
+                'matched_patients': {
+                    'treated_eids': matched_treated_eids,
+                    'control_eids': matched_control_eids,
             'pairs': matched_pairs
-        },
-        'treatment_times': {
+                },
+                'treatment_times': {
             'treated_times': matched_treatment_times,
             'control_times': [control_t0s[kept_control_eids.index(eid)] for eid in matched_control_eids]
-        },
-        'cohort_sizes': {
+                },
+                'cohort_sizes': {
             'treated': len(matched_treated_eids),
             'controls': len(matched_control_eids),
             'total': len(matched_treated_eids) + len(matched_control_eids)
-        },
-        'matching_features': {
+                },
+                'matching_features': {
             'treated': treated_features[[i for i, _ in matched_pairs]],
             'controls': control_features[[j for _, j in matched_pairs]]
         },
@@ -969,7 +969,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     if treated_event_times:
         treated_event_mean = np.mean(treated_event_times)
         treated_event_median = np.median(treated_event_times)
-    else:
+        else:
         treated_event_mean = treated_event_median = 0
         
     if control_event_times:
