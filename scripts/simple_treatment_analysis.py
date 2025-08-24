@@ -838,101 +838,122 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         else:
             Y_np = Y
         
-        # Extract outcomes for matched cohorts
-        treated_outcomes = []
-        control_outcomes = []
-        follow_up_times = []
-        
-        # Track event timing for analysis
-        treated_event_times = []
-        control_event_times = []
-        treated_censoring_times = []
-        control_censoring_times = []
-        
-        # Get outcomes for treated patients
-        for treated_idx in matched_treated_indices:
-            treated_eid = processed_ids[treated_idx]
-            treatment_time = None
-            
-            # Find treatment time from the original treated times
-            for i, eid in enumerate(treated_eids):
-                if eid == treated_eid:
-                    treatment_time = treated_times[i]
-                    break
-            
-            if treatment_time is not None and treated_idx < Y_np.shape[0]:
-                # Look for events after treatment time
-                if event_indices is not None:
-                    # Composite event - check if any of the specified events occurred
-                    post_treatment_outcomes = Y_np[treated_idx, event_indices, int(treatment_time):]
-                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
-                else:
-                    # If no specific event specified, use any event
-                    post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
-                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
-                
-                event_occurred = np.any(post_treatment_outcomes > 0)
-                max_followup = Y_np.shape[2] - int(index_time)
-                time_to_event_or_censor = min(5.0, max_followup)
+    # Extract outcomes for matched cohorts
+    treated_outcomes = []
+    control_outcomes = []
+    follow_up_times = []
 
-                if event_occurred:
-                    # Use actual event time if it occurs within follow-up window
-                    event_times = np.where(post_outcomes > 0)[0]
-                    actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
-                    time_to_event = min(actual_event_time, time_to_event_or_censor)
+    # Track event timing for analysis
+    treated_event_times = []
+    control_event_times = []
+    treated_censoring_times = []
+    control_censoring_times = []
+
+    # Get outcomes for treated patients
+    for treated_idx in matched_treated_indices:
+        treated_eid = processed_ids[treated_idx]
+        treatment_time = None
+        
+        # Find treatment time from the original treated times
+        for i, eid in enumerate(treated_eids):
+            if eid == treated_eid:
+                treatment_time = treated_times[i]
+                break
+        
+        if treatment_time is not None and treated_idx < Y_np.shape[0]:
+            # Look for events after treatment time
+            if event_indices is not None:
+                # Composite event - check if any of the specified events occurred
+                post_treatment_outcomes = Y_np[treated_idx, event_indices, int(treatment_time):]
+                post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+            else:
+                # If no specific event specified, use any event
+                post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
+                post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+            
+            # Calculate maximum available follow-up
+            max_followup = Y_np.shape[2] - int(treatment_time)
+            time_to_event_or_censor = min(5.0, max_followup)
+            
+            # Check if any event occurred in the full post-treatment period
+            event_occurred_anywhere = np.any(post_treatment_outcomes > 0)
+            
+            if event_occurred_anywhere:
+                # Find time to first event
+                event_times = np.where(post_treatment_outcomes > 0)[0]
+                actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                
+                # Check if event occurred within our follow-up window
+                if actual_event_time < time_to_event_or_censor:
+                    # Event occurred within follow-up window - count as event
+                    time_to_event = actual_event_time
+                    event_occurred = True
                     treated_event_times.append(time_to_event)
                 else:
-                    # Use full available follow-up time for censoring
+                    # Event occurred after follow-up window - treat as censored
                     time_to_event = time_to_event_or_censor
+                    event_occurred = False
                     treated_censoring_times.append(time_to_event)
-                
-                #if event_occurred:
-                    # Find time to first event
-                    #event_times = np.where(post_treatment_outcomes > 0)[0]
-                    #time_to_event = event_times[0] if len(event_times) > 0 else 5.0
-                    #treated_event_times.append(time_to_event)
-                #else:
-                    # Censored at end of follow-up (minimum 5 years)
-                   # time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
-                   # treated_censoring_times.append(time_to_event)
-                
-                treated_outcomes.append(int(event_occurred))
-                follow_up_times.append(time_to_event)
-        
-        # Get outcomes for control patients
-        for control_idx in matched_control_indices:
-            control_eid = processed_ids[control_idx]
+            else:
+                # No event occurred - censored at end of available follow-up
+                time_to_event = time_to_event_or_censor
+                event_occurred = False
+                treated_censoring_times.append(time_to_event)
             
-            # For controls, use their age-based time point as "treatment" time
-            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
-            if age_at_enroll is not None and not np.isnan(age_at_enroll):
-                control_time = int(age_at_enroll - 30)  # Convert to time index
+            treated_outcomes.append(int(event_occurred))
+            follow_up_times.append(time_to_event)
+
+    # Get outcomes for control patients
+    for control_idx in matched_control_indices:
+        control_eid = processed_ids[control_idx]
+        
+        # For controls, use their age-based time point as "treatment" time
+        age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+        if age_at_enroll is not None and not np.isnan(age_at_enroll):
+            control_time = int(age_at_enroll - 30)  # Convert to time index
+            
+            if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
+                # Look for events after control time
+                if event_indices is not None:
+                    # Composite event - check if any of the specified events occurred
+                    post_control_outcomes = Y_np[control_idx, event_indices, control_time:]
+                    post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                else:
+                    # If no specific event specified, use any event
+                    post_control_outcomes = Y_np[control_idx, :, control_time:]
+                    post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
                 
-                if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
-                    # Look for events after control time
-                    if event_indices is not None:
-                        # Composite event - check if any of the specified events occurred
-                        post_control_outcomes = Y_np[control_idx, event_indices, control_time:]
-                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
-                    else:
-                        # If no specific event specified, use any event
-                        post_control_outcomes = Y_np[control_idx, :, control_time:]
-                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                # Calculate maximum available follow-up
+                max_followup = Y_np.shape[2] - int(control_time)
+                time_to_event_or_censor = min(5.0, max_followup)
+                
+                # Check if any event occurred in the full post-control period
+                event_occurred_anywhere = np.any(post_control_outcomes > 0)
+                
+                if event_occurred_anywhere:
+                    # Find time to first event
+                    event_times = np.where(post_control_outcomes > 0)[0]
+                    actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
                     
-                    event_occurred = np.any(post_control_outcomes > 0)
-                    
-                    if event_occurred:
-                        # Find time to first event
-                        event_times = np.where(post_control_outcomes > 0)[0]
-                        time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    # Check if event occurred within our follow-up window
+                    if actual_event_time < time_to_event_or_censor:
+                        # Event occurred within follow-up window - count as event
+                        time_to_event = actual_event_time
+                        event_occurred = True
                         control_event_times.append(time_to_event)
                     else:
-                        # Censored at end of follow-up (minimum 5 years)
-                        time_to_event = min(5.0, Y_np.shape[2] - control_time)
+                        # Event occurred after follow-up window - treat as censored
+                        time_to_event = time_to_event_or_censor
+                        event_occurred = False
                         control_censoring_times.append(time_to_event)
-                    
-                    control_outcomes.append(int(event_occurred))
-                    follow_up_times.append(time_to_event)
+                else:
+                    # No event occurred - censored at end of available follow-up
+                    time_to_event = time_to_event_or_censor
+                    event_occurred = False
+                    control_censoring_times.append(time_to_event)
+                
+                control_outcomes.append(int(event_occurred))
+                follow_up_times.append(time_to_event)
         
         # ANALYZE EVENT TIMING DISTRIBUTIONS
         print("\n=== EVENT TIMING ANALYSIS ===")
