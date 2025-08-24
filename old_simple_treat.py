@@ -138,7 +138,10 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     excluded_pre_events += 1
                     continue  # Skip - had events within 1 year of enrollment
         
-        # Extract covariates with proper handling
+  
+
+
+                    # Extract covariates with proper handling
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         if np.isnan(age_at_enroll) or age_at_enroll is None:
             age_at_enroll = 57  # Fallback age
@@ -148,7 +151,8 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             # For treated patients: use treatment age as index date
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
-                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
+                # treatment_dates[treatment_idx] is already a time index (years), not months
+                treatment_age = 30 + treatment_dates[treatment_idx]  # Convert time index to years
                 age = treatment_age  # Use treatment age for matching
             else:
                 age = age_at_enroll
@@ -183,7 +187,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             # For treated patients: use first statin prescription date
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
-                treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
+                treatment_age = 30 + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
                 reference_age = age_at_enroll
@@ -484,6 +488,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     print("=== SIMPLIFIED TREATMENT ANALYSIS ===")
     
     # Extract treated and control patients
+    # Extract treated and control patients
     print("1. Extracting patient cohorts...")
     
     # Use ObservationalTreatmentPatternLearner if available
@@ -496,8 +501,11 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
                 signature_loadings=thetas,
                 processed_ids=processed_ids,
                 statin_prescriptions=true_statins,
-                covariates=cov
+                covariates=cov,
+                gp_scripts=gp_scripts
             )
+
+           
             # Get the treatment patterns from the OTPL
             patterns = otpl.treatment_patterns
             treated_eids = patterns['treated_patients']
@@ -506,10 +514,10 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             
             # For treated patients, t0 is treatment time
             treated_t0s = treated_treatment_times.copy()
-            # For controls, t0 is 0 (enrollment)
-            control_t0s = [0] * len(control_eids)
+  
             
             print(f"Extracted {len(treated_eids)} treated patients and {len(control_eids)} control patients")
+            print(f"Control patients with valid timing: {len(control_eids)}")
         else:
             raise ValueError("Covariates not available for OTPL")
         
@@ -524,9 +532,27 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         all_eids = set(processed_ids)
         treated_set = set(treated_eids)
         control_eids = list(all_eids - treated_set)
-        control_t0s = [0] * len(control_eids)  # Assume enrollment at time 0
+        
         
         print(f"Fallback: {len(treated_eids)} treated, {len(control_eids)} control patients")
+
+    # Now calculate control timing once for both paths
+    control_t0s = []
+    valid_control_eids = []
+    
+    for eid in control_eids:
+        try:
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                t0 = int(age_at_enroll - 30)
+                if t0 >= 10:
+                    control_t0s.append(t0)
+                    valid_control_eids.append(eid)
+        except:
+            continue
+    
+    control_eids = valid_control_eids
+    print(f"Control patients with valid timing: {len(control_eids)}")
     
     # Build features with exclusions
     print("2. Building features with exclusions...")
@@ -540,6 +566,10 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         control_eids, control_t0s, processed_ids, thetas, covariate_dicts, 
         sig_indices, is_treated=False, Y=Y, event_indices=event_indices
     )
+
+
+    
+    print(f"   Control patients after exclusions: {len(control_features):,}")
     
     if len(treated_features) == 0 or len(control_features) == 0:
         print("Error: No patients left after exclusions")
@@ -921,7 +951,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     cad_exclusion_failed = 0
     for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
         if eid in true_statins:
-            treatment_age = covariate_dicts['age_at_enroll'].get(int(eid), 57) + treatment_time
+            treatment_age = 30 + treatment_time
             cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
             cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
             if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
