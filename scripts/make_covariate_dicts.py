@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import sys
 import torch
-from dt import *
+#from dt import *
+
 sys.path.append('scripts')
 thetas = np.load("/Users/sarahurbut/aladynoulli2/pyScripts/thetas.npy")
 processed_ids = np.load("/Users/sarahurbut/aladynoulli2/pyScripts/processed_patient_ids.npy").astype(int)
@@ -46,6 +47,9 @@ eid_to_yob = dict(zip(cov['eid'], cov['birth_year']))
 # 7. Add prior disease/condition flags to covariate table
 # ---------------------------------------------
 # These functions flag prior disease status at enrollment for each subject
+def prev_condition(df, any_col, censor_age_col, enroll_age_col, new_col):
+    df[new_col] = ((df[any_col] == 2) & (df[censor_age_col] < df[enroll_age_col])).astype(int)
+    
 prev_condition(cov, 'Dm_Any', 'Dm_censor_age', 'age_enrolled', 'prev_dm')
 prev_condition(cov, 'DmT1_Any', 'DmT1_censor_age', 'age_enrolled', 'prev_dm1')
 prev_condition(cov, 'Ht_Any', 'Ht_censor_age', 'age_enrolled', 'prev_ht')

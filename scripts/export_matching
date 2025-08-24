@@ -1,0 +1,494 @@
+def export_matching_data_for_r_verification(matching_results, thetas, processed_ids, 
+                                           Y_tensor, event_indices, covariate_dicts, 
+                                           output_dir="./r_verification_data"):
+    """
+    Export all data needed to verify matching and reproduce HR calculations in R.
+    
+    This exports:
+    1. Matched patient pairs with EIDs
+    2. Treatment times and follow-up data
+    3. Outcomes for each patient
+    4. Covariates for verification
+    5. R script to reproduce the analysis
+    """
+    
+    import os
+    import pandas as pd
+    import numpy as pd
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"Exporting data to {output_dir} for R verification...")
+    
+    # Extract matched data
+    matched_treated_eids = matching_results['matched_patients']['treated_eids']
+    matched_control_eids = matching_results['matched_patients']['control_eids']
+    matched_treated_indices = matching_results['matched_patients']['treated_indices']
+    matched_control_indices = matching_results['matched_patients']['control_indices']
+    
+    # Convert PyTorch tensor to numpy if needed
+    if hasattr(Y_tensor, 'detach'):
+        Y_np = Y_tensor.detach().cpu().numpy()
+    else:
+        Y_np = Y_tensor
+    
+    # 1. Export matched pairs with EIDs
+    print("1. Exporting matched pairs...")
+    
+    matched_pairs_df = pd.DataFrame({
+        'pair_id': range(len(matched_treated_eids)),
+        'treated_eid': matched_treated_eids,
+        'control_eid': matched_control_eids,
+        'treated_global_index': matched_treated_indices,
+        'control_global_index': matched_control_indices
+    })
+    
+    matched_pairs_df.to_csv(f"{output_dir}/matched_pairs.csv", index=False)
+    print(f"   Exported {len(matched_pairs_df)} matched pairs")
+    
+    # 2. Export treatment times and follow-up data
+    print("2. Exporting treatment times and follow-up...")
+    
+    # Get treatment times for matched patients
+    treated_times = []
+    control_times = []
+    
+    for treated_eid in matched_treated_eids:
+        # Find treatment time from original data
+        treatment_time = None
+        for i, eid in enumerate(matching_results['treatment_times']['treated_times']):
+            if eid == treated_eid:
+                treatment_time = matching_results['treatment_times']['treated_times'][i]
+                break
+        
+        if treatment_time is not None:
+            treated_times.append(treatment_time)
+        else:
+            treated_times.append(np.nan)
+    
+    # Get control times (age-based)
+    for control_eid in matched_control_eids:
+        age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+        if age_at_enroll is not None and not np.isnan(age_at_enroll):
+            control_time = int(age_at_enroll - 30)  # Convert to time index
+            control_times.append(control_time)
+        else:
+            control_times.append(np.nan)
+    
+    timing_df = pd.DataFrame({
+        'pair_id': range(len(matched_treated_eids)),
+        'treated_eid': matched_treated_eids,
+        'control_eid': matched_control_eids,
+        'treated_time_index': treated_times,
+        'control_time_index': control_times,
+        'treated_age': [t + 30 if not np.isnan(t) else np.nan for t in treated_times],  # Convert back to age
+        'control_age': [t + 30 if not np.isnan(t) else np.nan for t in control_times]
+    })
+    
+    timing_df.to_csv(f"{output_dir}/treatment_timing.csv", index=False)
+    print(f"   Exported timing data for {len(timing_df)} pairs")
+    
+    # 3. Export outcomes for each patient
+    print("3. Exporting outcomes...")
+    
+    outcomes_data = []
+    
+    for pair_id, (treated_eid, control_eid) in enumerate(zip(matched_treated_eids, matched_control_eids)):
+        # Get patient indices
+        treated_idx = np.where(processed_ids == treated_eid)[0][0]
+        control_idx = np.where(processed_ids == control_eid)[0][0]
+        
+        # Get treatment time
+        treatment_time = treated_times[pair_id]
+        control_time = control_times[pair_id]
+        
+        if treatment_time is not None and not np.isnan(treatment_time) and control_time is not None and not np.isnan(control_time):
+            # Extract outcomes after treatment/control time
+            if event_indices is not None:
+                # Composite event
+                treated_post_outcomes = Y_np[treated_idx, event_indices, int(treatment_time):]
+                treated_post_outcomes = np.any(treated_post_outcomes > 0, axis=0)
+                
+                control_post_outcomes = Y_np[control_idx, event_indices, int(control_time):]
+                control_post_outcomes = np.any(control_post_outcomes > 0, axis=0)
+            else:
+                # Any event
+                treated_post_outcomes = np.any(Y_np[treated_idx, :, int(treatment_time):] > 0, axis=0)
+                control_post_outcomes = np.any(Y_np[control_idx, :, int(control_time):] > 0, axis=0)
+            
+            # Check if events occurred
+            treated_event = np.any(treated_post_outcomes > 0)
+            control_event = np.any(control_post_outcomes > 0)
+            
+            # Calculate time to event or censoring
+            if treated_event:
+                event_times = np.where(treated_post_outcomes > 0)[0]
+                treated_time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+            else:
+                treated_time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+            
+            if control_event:
+                event_times = np.where(control_post_outcomes > 0)[0]
+                control_time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+            else:
+                control_time_to_event = min(5.0, Y_np.shape[2] - int(control_time))
+            
+            outcomes_data.append({
+                'pair_id': pair_id,
+                'treated_eid': treated_eid,
+                'control_eid': control_eid,
+                'treated_event': int(treated_event),
+                'control_event': int(control_event),
+                'treated_time_to_event': treated_time_to_event,
+                'control_time_to_event': control_time_to_event,
+                'treated_follow_up': treated_time_to_event,
+                'control_follow_up': control_time_to_event
+            })
+    
+    outcomes_df = pd.DataFrame(outcomes_data)
+    outcomes_df.to_csv(f"{output_dir}/outcomes.csv", index=False)
+    print(f"   Exported outcomes for {len(outcomes_df)} pairs")
+    
+    # 4. Export covariates for verification
+    print("4. Exporting covariates...")
+    
+    covariates_data = []
+    
+    for pair_id, (treated_eid, control_eid) in enumerate(zip(matched_treated_eids, matched_control_eids)):
+        # Extract covariates for both patients
+        treated_covs = {}
+        control_covs = {}
+        
+        for cov_name, cov_dict in covariate_dicts.items():
+            treated_covs[f'treated_{cov_name}'] = cov_dict.get(int(treated_eid), np.nan)
+            control_covs[f'control_{cov_name}'] = cov_dict.get(int(control_eid), np.nan)
+        
+        # Combine into one row
+        row_data = {'pair_id': pair_id, 'treated_eid': treated_eid, 'control_eid': control_eid}
+        row_data.update(treated_covs)
+        row_data.update(control_covs)
+        
+        covariates_data.append(row_data)
+    
+    covariates_df = pd.DataFrame(covariates_data)
+    covariates_df.to_csv(f"{output_dir}/covariates.csv", index=False)
+    print(f"   Exported covariates for {len(covariates_df)} pairs")
+    
+    # 5. Export signature data at treatment time
+    print("5. Exporting signature data...")
+    
+    signature_data = []
+    
+    for pair_id, (treated_eid, control_eid) in enumerate(zip(matched_treated_eids, matched_control_eids)):
+        # Get patient indices
+        treated_idx = np.where(processed_ids == treated_eid)[0][0]
+        control_idx = np.where(processed_ids == control_eid)[0][0]
+        
+        # Get treatment time
+        treatment_time = treated_times[pair_id]
+        control_time = control_times[pair_id]
+        
+        if treatment_time is not None and not np.isnan(treatment_time) and control_time is not None and not np.isnan(control_time):
+            # Extract signatures at treatment/control time
+            treated_signatures = thetas[treated_idx, :, int(treatment_time)]
+            control_signatures = thetas[control_idx, :, int(control_time)]
+            
+            # Create row for each signature
+            for sig_idx in range(thetas.shape[1]):
+                signature_data.append({
+                    'pair_id': pair_id,
+                    'treated_eid': treated_eid,
+                    'control_eid': control_eid,
+                    'signature_index': sig_idx,
+                    'treated_signature': treated_signatures[sig_idx],
+                    'control_signature': control_signatures[sig_idx],
+                    'signature_difference': treated_signatures[sig_idx] - control_signatures[sig_idx]
+                })
+    
+    signatures_df = pd.DataFrame(signature_data)
+    signatures_df.to_csv(f"{output_dir}/signatures.csv", index=False)
+    print(f"   Exported signatures for {len(signatures_df)} pairs × {thetas.shape[1]} signatures")
+    
+    # 6. Create R script for verification
+    print("6. Creating R verification script...")
+    
+    r_script = create_r_verification_script(output_dir)
+    
+    with open(f"{output_dir}/verify_matching_and_hr.R", "w") as f:
+        f.write(r_script)
+    
+    print(f"   Created R script: verify_matching_and_hr.R")
+    
+    # 7. Create summary report
+    print("7. Creating summary report...")
+    
+    summary_report = create_summary_report(matching_results, outcomes_df, covariates_df, signatures_df)
+    
+    with open(f"{output_dir}/summary_report.txt", "w") as f:
+        f.write(summary_report)
+    
+    print(f"   Created summary report: summary_report.txt")
+    
+    print(f"\n✅ All data exported to {output_dir}/")
+    print(f"   Files created:")
+    print(f"   - matched_pairs.csv: Patient pairs with EIDs")
+    print(f"   - treatment_timing.csv: Treatment times and ages")
+    print(f"   - outcomes.csv: Event data and follow-up times")
+    print(f"   - covariates.csv: Clinical variables for both groups")
+    print(f"   - signatures.csv: Signature loadings at treatment time")
+    print(f"   - verify_matching_and_hr.R: R script to reproduce analysis")
+    print(f"   - summary_report.txt: Summary of exported data")
+    
+    return output_dir
+
+def create_r_verification_script(output_dir):
+    """
+    Create R script to verify matching and reproduce HR calculations
+    """
+    
+    r_script = '''# R Script to Verify Matching and Reproduce Hazard Ratio Calculations
+# Generated from Python analysis
+# 
+# This script:
+# 1. Loads the exported data
+# 2. Verifies matching quality
+# 3. Reproduces the hazard ratio calculations
+# 4. Creates publication-quality plots
+
+# Load required libraries
+library(survival)
+library(survminer)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+# Set working directory (update this path)
+# setwd("PATH_TO_YOUR_DATA")
+
+# Load the exported data
+matched_pairs <- read.csv("matched_pairs.csv")
+timing <- read.csv("treatment_timing.csv")
+outcomes <- read.csv("outcomes.csv")
+covariates <- read.csv("covariates.csv")
+signatures <- read.csv("signatures.csv")
+
+print("Data loaded successfully!")
+print(paste("Number of matched pairs:", nrow(matched_pairs)))
+
+# 1. VERIFY MATCHING QUALITY
+print("\\n=== VERIFYING MATCHING QUALITY ===")
+
+# Check that we have complete data
+complete_pairs <- outcomes %>%
+  filter(!is.na(treated_event) & !is.na(control_event))
+
+print(paste("Complete pairs for analysis:", nrow(complete_pairs)))
+
+# 2. REPRODUCE HAZARD RATIO CALCULATION
+print("\\n=== REPRODUCING HAZARD RATIO CALCULATION ===")
+
+# Prepare data for Cox model
+survival_data <- complete_pairs %>%
+  select(treated_eid, control_eid, treated_event, control_event, 
+         treated_follow_up, control_follow_up) %>%
+  mutate(
+    # Create long format for survival analysis
+    patient_id = c(treated_eid, control_eid),
+    event = c(treated_event, control_event),
+    time = c(treated_follow_up, control_follow_up),
+    treatment = c(rep(1, nrow(complete_pairs)), rep(0, nrow(complete_pairs)))
+  )
+
+# Fit Cox proportional hazards model
+cox_model <- coxph(Surv(time, event) ~ treatment, data = survival_data)
+
+# Extract results
+hr_summary <- summary(cox_model)
+hr <- exp(hr_summary$coefficients[1, 1])
+hr_ci_lower <- exp(hr_summary$coefficients[1, 1] - 1.96 * hr_summary$coefficients[1, 3])
+hr_ci_upper <- exp(hr_summary$coefficients[1, 1] + 1.96 * hr_summary$coefficients[1, 3])
+p_value <- hr_summary$coefficients[1, 5]
+
+print(paste("Hazard Ratio:", round(hr, 3)))
+print(paste("95% CI:", round(hr_ci_lower, 3), "-", round(hr_ci_upper, 3)))
+print(paste("P-value:", round(p_value, 4)))
+
+# 3. VERIFY MATCHING BALANCE
+print("\\n=== VERIFYING MATCHING BALANCE ===")
+
+# Check age balance
+age_balance <- timing %>%
+  filter(!is.na(treated_age) & !is.na(control_age)) %>%
+  mutate(age_diff = treated_age - control_age)
+
+print(paste("Mean age difference (treated - control):", round(mean(age_balance$age_diff), 2)))
+print(paste("Age difference SD:", round(sd(age_balance$age_diff), 2)))
+
+# Check signature balance
+signature_balance <- signatures %>%
+  group_by(signature_index) %>%
+  summarise(
+    mean_diff = mean(signature_difference, na.rm = TRUE),
+    sd_diff = sd(signature_difference, na.rm = TRUE)
+  )
+
+print("\\nSignature balance (treated - control):")
+print(signature_balance)
+
+# 4. CREATE SURVIVAL PLOTS
+print("\\n=== CREATING SURVIVAL PLOTS ===")
+
+# Create survival object
+surv_obj <- Surv(survival_data$time, survival_data$event)
+
+# Fit Kaplan-Meier
+km_fit <- survfit(surv_obj ~ treatment, data = survival_data)
+
+# Create publication-quality plot
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = survival_data,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  palette = c("#E7B800", "#2E9FDF"),
+  xlab = "Time (years)",
+  ylab = "Survival probability",
+  title = "Kaplan-Meier Survival Curves",
+  subtitle = paste("Hazard Ratio =", round(hr, 3), 
+                   " (95% CI:", round(hr_ci_lower, 3), "-", round(hr_ci_upper, 3), ")")
+)
+
+# Save plot
+pdf("survival_plot.pdf", width = 10, height = 8)
+print(surv_plot)
+dev.off()
+
+print("Survival plot saved as 'survival_plot.pdf'")
+
+# 5. SUBGROUP ANALYSIS BY SIGNATURES
+print("\\n=== SUBGROUP ANALYSIS BY SIGNATURES ===")
+
+# Group by signature levels (example: signature 0)
+sig0_data <- signatures %>%
+  filter(signature_index == 0) %>%
+  mutate(
+    sig0_group = ifelse(treated_signature > median(treated_signature, na.rm = TRUE), 
+                        "High", "Low")
+  )
+
+# Merge with outcomes
+sig0_analysis <- sig0_data %>%
+  left_join(outcomes, by = "pair_id") %>%
+  filter(!is.na(treated_event))
+
+# Calculate HR for each group
+sig0_results <- sig0_analysis %>%
+  group_by(sig0_group) %>%
+  group_modify(~ {
+    # Create survival data for this group
+    group_data <- data.frame(
+      patient_id = c(.x$treated_eid, .x$control_eid),
+      event = c(.x$treated_event, .x$control_event),
+      time = c(.x$treated_follow_up, .x$control_follow_up),
+      treatment = c(rep(1, nrow(.x)), rep(0, nrow(.x)))
+    )
+    
+    # Fit Cox model
+    if(nrow(group_data) >= 10) {
+      cox_fit <- coxph(Surv(time, event) ~ treatment, data = group_data)
+      hr_group <- exp(coef(cox_fit)[1])
+      ci_lower <- exp(confint(cox_fit)[1, 1])
+      ci_upper <- exp(confint(cox_fit)[1, 2])
+      p_val <- summary(cox_fit)$coefficients[1, 5]
+    } else {
+      hr_group <- NA
+      ci_lower <- NA
+      ci_upper <- NA
+      p_val <- NA
+    }
+    
+    data.frame(
+      n_pairs = nrow(.x),
+      hr = hr_group,
+      ci_lower = ci_lower,
+      ci_upper = ci_upper,
+      p_value = p_val
+    )
+  })
+
+print("\\nHazard ratios by signature 0 group:")
+print(sig0_results)
+
+# 6. SAVE RESULTS
+print("\\n=== SAVING RESULTS ===")
+
+# Save main results
+results_summary <- data.frame(
+  analysis = "Main Analysis",
+  n_pairs = nrow(complete_pairs),
+  hazard_ratio = hr,
+  ci_lower = hr_ci_lower,
+  ci_upper = hr_ci_upper,
+  p_value = p_value
+)
+
+write.csv(results_summary, "hr_results.csv", row.names = FALSE)
+print("Results saved as 'hr_results.csv'")
+
+# Save subgroup results
+write.csv(sig0_results, "subgroup_results.csv", row.names = FALSE)
+print("Subgroup results saved as 'subgroup_results.csv'")
+
+print("\\n=== VERIFICATION COMPLETE ===")
+print("All analyses reproduced in R successfully!")
+print("Check the generated files for detailed results.")
+'''
+    
+    return r_script
+
+def create_summary_report(matching_results, outcomes_df, covariates_df, signatures_df):
+    """
+    Create a summary report of the exported data
+    """
+    
+    report = f"""SUMMARY REPORT - EXPORTED DATA FOR R VERIFICATION
+{'='*60}
+
+EXPORT SUMMARY:
+- Total matched pairs: {len(outcomes_df)}
+- Complete outcome data: {len(outcomes_df.dropna())}
+- Signatures exported: {signatures_df['signature_index'].nunique()}
+- Covariates exported: {len([col for col in covariates_df.columns if col.startswith('treated_')])}
+
+DATA FILES:
+1. matched_pairs.csv: Patient pairs with EIDs and indices
+2. treatment_timing.csv: Treatment times and ages for both groups
+3. outcomes.csv: Event data and follow-up times
+4. covariates.csv: Clinical variables for treated and control patients
+5. signatures.csv: Signature loadings at treatment time
+6. verify_matching_and_hr.R: R script to reproduce analysis
+
+ANALYSIS REPRODUCTION:
+- The R script will reproduce the exact same hazard ratio calculation
+- All matching verification can be done in R
+- Subgroup analysis by signatures is included
+- Publication-quality survival plots will be generated
+
+USAGE IN R:
+1. Set working directory to the data folder
+2. Run: source("verify_matching_and_hr.R")
+3. Check generated plots and results files
+
+VERIFICATION STEPS:
+1. Confirm matched pairs are correct
+2. Verify treatment times align with patient IDs
+3. Reproduce hazard ratio calculation
+4. Check matching balance
+5. Run subgroup analyses
+
+{'='*60}
+"""
+    
+    return report

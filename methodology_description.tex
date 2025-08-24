@@ -1,0 +1,260 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Methodology for Differential Treatment Effects Analysis Using Observational Data and Signature Trajectories}
+\author{Sarah Urbut}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document describes a comprehensive methodology for analyzing differential treatment effects using observational data, signature trajectories, and matched control analysis. The approach combines three key components: (1) observational treatment pattern learning to identify when patients actually initiated treatment, (2) propensity score matching using signature trajectories and clinical covariates, and (3) individual treatment effect estimation with heterogeneity testing. The methodology successfully reproduces known trial results while identifying patient subgroups that may benefit differentially from treatment.
+\end{abstract}
+
+\section{Introduction}
+
+The analysis of differential treatment effects in observational data presents unique challenges, particularly when dealing with time-varying biomarker signatures and complex treatment initiation patterns. This methodology addresses these challenges through a three-stage approach that leverages the temporal structure of signature data to identify true treatment effects while accounting for confounding and selection bias.
+
+\section{Methodological Framework}
+
+\subsection{Stage 1: Observational Treatment Pattern Learning}
+
+The first stage involves learning treatment patterns directly from observational data without requiring ground truth labels. This is implemented through the \texttt{ObservationalTreatmentPatternLearner} class, which:
+
+\begin{enumerate}
+    \item \textbf{Extracts Treatment Initiation Times}: Processes prescription data to identify the first statin prescription for each patient, converting dates to age-based time indices relative to a 30-year baseline.
+    
+    \item \textbf{Identifies Pre-Treatment Signatures}: Extracts signature trajectories for the 12 years preceding treatment initiation, ensuring sufficient follow-up (minimum 12 years from enrollment).
+    
+    \item \textbf{Extracts Pre-Treatment Signatures}: Captures the 12-year signature trajectory leading up to treatment initiation for each patient.
+    
+    \item \textbf{Identifies Treatment Timing Patterns}: Analyzes when patients typically initiate treatment based on their signature evolution and clinical characteristics.
+\end{enumerate}
+
+The key innovation here is that treatment patterns are learned from the data itself, rather than imposed by external criteria. This allows the system to discover what signature states actually trigger clinical decisions to initiate treatment.
+
+\subsection{Stage 2: Propensity Score Matching with Signature Trajectories}
+
+The second stage implements a sophisticated matching procedure that combines signature trajectories with clinical covariates:
+
+\begin{enumerate}
+    \item \textbf{Feature Engineering}: For each patient, extracts a 12-year window of signature trajectories (12 years × number of signatures) plus clinical covariates including age, sex, diabetes status, antihypertensive use, lipid levels, blood pressure, and smoking status.
+    
+    \item \textbf{Patient Exclusions}: Applies rigorous exclusion criteria:
+    \begin{itemize}
+        \item Coronary artery disease (CAD) before treatment/enrollment date
+        \item Missing binary variables (diabetes, hypertension, hyperlipidemia status)
+        \item Insufficient signature history (< 12 years)
+    \end{itemize}
+    
+    \item \textbf{Data Imputation}: Imputes missing quantitative variables (LDL, HDL, total cholesterol, systolic blood pressure) using population means.
+    
+    \item \textbf{Nearest Neighbor Matching}: Performs 1:1 matching between treated and control patients using standardized features, ensuring balance across both signature trajectories and clinical characteristics.
+\end{enumerate}
+
+The matching procedure is particularly sophisticated because it accounts for the temporal evolution of signatures, not just their levels at a single time point. This is crucial for cardiovascular disease, where risk evolves over decades.
+
+\subsection{Stage 3: Individual Treatment Effect Estimation}
+
+The third stage calculates true individual treatment effects using the same Cox proportional hazards methodology that successfully reproduced trial results:
+
+\begin{enumerate}
+    \item \textbf{Time-to-Event Analysis}: For each matched pair, calculates time-to-event from the index date (treatment time for treated patients, enrollment age for controls) using a minimum 5-year follow-up window.
+    
+    \item \textbf{Individual Treatment Effects}: Computes individual treatment effects as differences in hazard rates between treated and control patients, accounting for censoring and competing risks.
+    
+    \item \textbf{Heterogeneity Testing}: Tests whether treatment effects vary significantly across signature levels using:
+    \begin{itemize}
+        \item Correlation analysis between signature values and treatment effects
+        \item High vs. low signature group comparisons with t-tests
+        \item Effect size calculations using standardized mean differences
+    \end{itemize}
+\end{enumerate}
+
+\section{Key Methodological Innovations}
+
+\subsection{Temporal Signature Analysis}
+
+Unlike traditional approaches that use cross-sectional biomarker measurements, this methodology leverages the full temporal trajectory of signatures:
+
+\begin{equation}
+\text{Signature Feature Vector} = [\theta_{i,k,t-w}, \theta_{i,k,t-w+1}, \ldots, \theta_{i,k,t-1}]
+\end{equation}
+
+where $\theta_{i,k,t}$ represents the loading of signature $k$ for patient $i$ at time $t$, and $w$ is the 12-year window. The time grid uses yearly intervals (age 30 = index 0, age 81 = index 51), so the 12-year pre-treatment window captures the evolution of risk signatures over a clinically meaningful period.
+
+\textbf{Important Note on Time Scales}: The analysis uses a yearly time grid where each index represents one year of age. However, some visualization code labels the 12-year pre-treatment window as "months before treatment" for plotting purposes. This is purely a labeling convention - the actual analysis uses yearly intervals, making the 12-year window appropriate for capturing the evolution of cardiovascular risk over clinically relevant time periods.
+
+\subsection{Nearest Neighbor Matching as Propensity Score Method}
+
+The matching procedure uses nearest neighbor search to find the most similar control patient for each treated patient, effectively implementing a form of propensity score matching:
+
+\begin{equation}
+\text{Matched Control}_i = \arg\min_{j \in \text{Controls}} \|\mathbf{x}_i^{\text{treated}} - \mathbf{x}_j^{\text{control}}\|_2
+\end{equation}
+
+where $\mathbf{x}_i^{\text{treated}}$ and $\mathbf{x}_j^{\text{control}}$ are the standardized feature vectors for treated and control patients respectively. The algorithm='auto' parameter automatically selects the most efficient algorithm (typically 'ball_tree' for high-dimensional data) to optimize computational speed while maintaining matching quality.
+
+\subsection{Propensity Score Matching with High-Dimensional Features}
+
+The matching procedure handles high-dimensional feature spaces through standardization and nearest neighbor search:
+
+\begin{equation}
+\text{Standardized Features} = \frac{\mathbf{X} - \boldsymbol{\mu}}{\boldsymbol{\sigma}}
+\end{equation}
+
+where $\mathbf{X}$ is the feature matrix, and $\boldsymbol{\mu}$ and $\boldsymbol{\sigma}$ are the mean and standard deviation vectors. The nearest neighbor algorithm with \texttt{algorithm='auto'} automatically selects the most efficient search algorithm:
+\begin{itemize}
+    \item \textbf{Ball Tree}: For high-dimensional data (typically > 20 dimensions), provides $O(\log n)$ search complexity
+    \item \textbf{KD Tree}: For lower-dimensional data, provides $O(\log n)$ search complexity  
+    \item \textbf{Brute Force}: For very small datasets, provides $O(n)$ search complexity
+\end{itemize}
+
+This automatic selection ensures optimal performance across different data sizes and dimensionalities.
+
+\section{Validation and Quality Control}
+
+\subsection{Matching Balance Assessment}
+
+The methodology includes comprehensive balance assessment:
+
+\begin{enumerate}
+    \item \textbf{Standardized Differences}: Calculates standardized differences before and after matching for all covariates
+    \item \textbf{Balance Improvement}: Quantifies the improvement in balance achieved through matching
+    \item \textbf{Feature Importance}: Identifies which features contribute most to successful matching
+\end{enumerate}
+
+\subsection{Patient Cohort Verification}
+
+Multiple verification steps ensure data integrity:
+
+\begin{enumerate}
+    \item \textbf{Treatment Verification}: Confirms that all "treated" patients actually received statins
+    \item \textbf{Control Verification}: Ensures that all "control" patients never received statins
+    \item \textbf{Index Alignment}: Verifies proper alignment between local and global patient indices
+    \item \textbf{Treatment Time Alignment}: Confirms that treatment times correspond to the correct patients
+\end{enumerate}
+
+\subsection{Reproduction of Known Results}
+
+The methodology validates against known trial results:
+
+\begin{equation}
+\text{Validation Score} = \mathbb{I}(\text{CI overlaps expected HR}) \times \mathbb{I}(p < 0.05)
+\end{equation}
+
+where the expected hazard ratio (HR) is 0.75 based on clinical trial evidence.
+
+\section{Statistical Analysis}
+
+\subsection{Hazard Ratio Calculation}
+
+Uses Cox proportional hazards models with proper follow-up:
+
+\begin{equation}
+h(t|X) = h_0(t) \exp(\beta_1 X_1 + \beta_2 X_2 + \ldots + \beta_p X_p)
+\end{equation}
+
+where $h_0(t)$ is the baseline hazard, and $X_i$ represents treatment status and covariates.
+
+\subsection{Differential Effects Testing}
+
+Tests for treatment effect heterogeneity across signature levels by comparing high vs. low signature groups:
+
+\begin{equation}
+\text{Individual Effect}_i = \frac{\text{Control Hazard}_i - \text{Treated Hazard}_i}{\text{Follow-up Time}_i}
+\end{equation}
+
+The methodology then splits patients into high and low signature groups based on median signature values and tests whether treatment effects differ significantly between these groups using t-tests and effect size calculations.
+
+\subsection{Effect Size Quantification}
+
+Uses standardized mean differences to quantify the magnitude of differential effects:
+
+\begin{equation}
+\text{Effect Size} = \frac{\bar{X}_{\text{high}} - \bar{X}_{\text{low}}}{s_{\text{pooled}}}
+\end{equation}
+
+where $\bar{X}_{\text{high}}$ and $\bar{X}_{\text{low}}$ are the mean treatment effects for high and low signature groups, and $s_{\text{pooled}}$ is the pooled standard deviation of all treatment effects. This effect size is calculated in the \texttt{test\_differential\_treatment\_effects\_by\_signatures} function when comparing high vs. low signature groups.
+
+\section{Implementation Details}
+
+\subsection{Data Structures}
+
+The methodology handles complex data structures:
+
+\begin{itemize}
+    \item \textbf{Signature Tensor}: $\Theta \in \mathbb{R}^{N \times K \times T}$ where $N$ is patients, $K$ is signatures, and $T$ is time points (yearly intervals from age 30 to 81)
+    \item \textbf{Outcome Tensor}: $Y \in \mathbb{R}^{N \times E \times T}$ where $E$ is the number of event types
+    \item \textbf{Covariate Dictionaries}: Hierarchical structure for efficient patient lookup
+\end{itemize}
+
+The time dimension $T$ represents yearly intervals, with index 0 corresponding to age 30 and index 51 corresponding to age 81. This yearly granularity provides sufficient temporal resolution for cardiovascular risk assessment while maintaining computational efficiency.
+
+\subsection{Computational Efficiency}
+
+Optimizations include:
+
+\begin{enumerate}
+    \item \textbf{Vectorized Operations}: Uses NumPy for efficient array operations
+    \item \textbf{Index Mapping}: Pre-computes patient ID to tensor index mappings
+    \item \textbf{Batch Processing}: Processes patients in batches to manage memory usage
+    \item \textbf{Parallel Processing}: Supports parallel computation for large datasets
+\end{enumerate}
+
+\section{Clinical Interpretation}
+
+\subsection{Treatment Readiness Signatures}
+
+The methodology identifies signatures that indicate when patients are most likely to benefit from treatment:
+
+\begin{enumerate}
+    \item \textbf{Trend Analysis}: Identifies signatures with concerning upward trajectories
+    \item \textbf{Acceleration Detection}: Finds signatures that are accelerating toward risk thresholds
+    \item \textbf{Timing Optimization}: Determines optimal treatment timing based on signature evolution
+\end{enumerate}
+
+\subsection{Personalized Treatment Effects}
+
+Provides patient-specific treatment effect estimates:
+
+\begin{equation}
+\text{Personalized Effect}_i = f(\text{Signature Pattern}_i, \text{Clinical Covariates}_i)
+\end{equation}
+
+\section{Strengths and Limitations}
+
+\subsection{Strengths}
+
+\begin{enumerate}
+    \item \textbf{Observational Learning}: Discovers treatment patterns without external bias
+    \item \textbf{Temporal Modeling}: Accounts for the evolution of risk over time
+    \item \textbf{Comprehensive Matching}: Balances both signature and clinical characteristics
+    \item \textbf{Validation Framework}: Reproduces known trial results
+    \item \textbf{Individual Effects}: Provides patient-specific treatment effect estimates
+\end{enumerate}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Data Requirements}: Requires extensive longitudinal data
+    \item \textbf{Computational Complexity}: High-dimensional matching can be computationally intensive
+    \item \textbf{Assumption Dependencies}: Relies on proportional hazards and no unmeasured confounding
+    \item \textbf{Generalizability}: Results may not extend to populations with different signature patterns
+\end{enumerate}
+
+\section{Conclusion}
+
+This methodology represents a significant advance in observational treatment effects analysis by combining temporal signature modeling with rigorous causal inference methods. The three-stage approach successfully addresses the key challenges of confounding, selection bias, and temporal dynamics while providing clinically interpretable results. The ability to learn treatment patterns from data and identify differential treatment effects opens new possibilities for personalized medicine and treatment optimization.
+
+The methodology's success in reproducing known trial results while discovering novel treatment patterns demonstrates its validity and potential for uncovering new insights in observational data. Future work could extend this framework to other therapeutic areas and incorporate additional data modalities such as genetic information and environmental factors.
+
+\end{document}
