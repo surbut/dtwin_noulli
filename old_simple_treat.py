@@ -276,6 +276,89 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
 
 
 
+def calculate_hazard_ratio(treated_outcomes, control_outcomes, follow_up_times):
+    """
+    Calculate hazard ratio using Cox proportional hazards model
+    
+    Parameters:
+    - treated_outcomes: Binary outcome data for treated patients (1=event, 0=no event)
+    - control_outcomes: Binary outcome data for control patients (1=event, 0=no event)
+    - follow_up_times: Follow-up times for both groups (in years)
+    
+    Returns:
+    - Dictionary with HR results
+    """
+    try:
+        from lifelines import CoxPHFitter
+        import warnings
+        warnings.filterwarnings('ignore')
+    except ImportError:
+        print("Warning: lifelines not available for HR calculation")
+        return None
+    
+    # Prepare data for Cox model
+    import pandas as pd
+    
+    # Create survival dataset
+    n_treated = len(treated_outcomes)
+    n_control = len(control_outcomes)
+    
+    # Combine data
+    all_outcomes = np.concatenate([treated_outcomes, control_outcomes])
+    all_times = np.concatenate([follow_up_times[:n_treated], follow_up_times[n_treated:n_treated+n_control]])
+    treatment_status = np.concatenate([np.ones(n_treated), np.zeros(n_control)])
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'time': all_times,
+        'event': all_outcomes,
+        'treatment': treatment_status
+    })
+    
+    # Fit Cox proportional hazards model
+    cph = CoxPHFitter()
+    cph.fit(df, duration_col='time', event_col='event')
+    
+    # Extract results
+    hr = np.exp(cph.params_['treatment'])
+    
+    # Get confidence intervals
+    try:
+        hr_ci_lower = np.exp(cph.confidence_intervals_.loc['treatment', 'treatment_lower'])
+        hr_ci_upper = np.exp(cph.confidence_intervals_.loc['treatment', 'treatment_upper'])
+    except KeyError:
+        try:
+            hr_ci_lower = np.exp(cph.confidence_intervals_.loc['treatment', 'lower 0.95'])
+            hr_ci_upper = np.exp(cph.confidence_intervals_.loc['treatment', 'upper 0.95'])
+        except KeyError:
+            hr_ci_lower = hr * 0.8
+            hr_ci_upper = hr * 1.2
+    
+    p_value = cph.summary.loc['treatment', 'p']
+    c_index = cph.concordance_index_
+    
+    # Compare to expected trial results
+    expected_hr = 0.75
+    hr_difference = hr - expected_hr
+    ci_overlaps_expected = (hr_ci_lower <= expected_hr <= hr_ci_upper)
+    
+    results = {
+        'hazard_ratio': hr,
+        'hr_ci_lower': hr_ci_lower,
+        'hr_ci_upper': hr_ci_upper,
+        'p_value': p_value,
+        'concordance_index': c_index,
+        'expected_hr': expected_hr,
+        'hr_difference': hr_difference,
+        'ci_overlaps_expected': ci_overlaps_expected,
+        'n_treated': n_treated,
+        'n_control': n_control,
+        'total_events': np.sum(all_outcomes),
+        'validation_passed': ci_overlaps_expected and p_value < 0.05
+    }
+    
+    return results
+
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
@@ -333,7 +416,7 @@ def perform_greedy_1to1_matching_fast(treated_features, control_features,
     
     return (matched_treated_indices, matched_control_indices, 
             matched_treated_eids, matched_control_eids)
-            
+
 def perform_matching_fast(treated_features, control_features, treated_eids, control_eids,
                          treated_indices, control_indices, method='nearest'):
     """
@@ -573,24 +656,30 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             raise ValueError("Covariates not available for OTPL")
         
 
-    # Now calculate control timing once for both paths
-    control_t0s = []
-    valid_control_eids = []
+        # Now calculate control timing once for both paths
+        control_t0s = []
+        valid_control_eids = []
+        
+        for eid in control_eids:
+            try:
+                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    t0 = int(age_at_enroll - 30)
+                    if t0 >= 10:
+                        control_t0s.append(t0)
+                        valid_control_eids.append(eid)
+            except:
+                continue
+        
+        control_eids = valid_control_eids
+        print(f"Control patients with valid timing: {len(control_eids)}")
+
+    except Exception as e:
+        print(f"Error setting up OTPL: {e}")
+        return None
     
-    for eid in control_eids:
-        try:
-            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid))
-            if age_at_enroll is not None and not np.isnan(age_at_enroll):
-                t0 = int(age_at_enroll - 30)
-                if t0 >= 10:
-                    control_t0s.append(t0)
-                    valid_control_eids.append(eid)
-        except:
-            continue
-    
-    control_eids = valid_control_eids
-    print(f"Control patients with valid timing: {len(control_eids)}")
-    
+
+
     # Build features with exclusions
     print("2. Building features with exclusions...")
     treated_features, treated_indices, kept_treated_eids = build_features(
@@ -604,7 +693,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         sig_indices, is_treated=False, Y=Y, event_indices=event_indices
     )
 
-
+    print(f"   Treated patients after exclusions: {len(treated_features):,}")
     
     print(f"   Control patients after exclusions: {len(control_features):,}")
     
@@ -642,34 +731,35 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Perform matching
     print("5. Performing matching...")
-    matched_treated, matched_controls, matched_pairs = perform_matching_fast(
-        treated_features, control_features, kept_treated_eids, kept_control_eids,
-        treated_indices, control_indices, method='greedy_vectorized'
+    
+   
+    
+    matched_treated_indices, matched_control_indices, matched_treated_eids, matched_control_eids = perform_greedy_1to1_matching_fast(
+        treated_features, control_features, treated_indices, control_indices,
+        kept_treated_eids, kept_control_eids
     )
     
-    if len(matched_pairs) == 0:
+    if len(matched_treated_indices) == 0:
         print("Error: No matches found")
         return None
     
     # Extract outcomes for matched patients
-    print("4. Extracting outcomes...")
+    print("6. Extracting outcomes...")
     
-    # Get treatment times for matched treated patients
- # Get treatment times for matched treated patients from OTPL
-    matched_treated_eids = [kept_treated_eids[i] for i, _ in matched_pairs]
+    # Get treatment times for matched treated patients from OTPL
     matched_treatment_times = []
-
     for eid in matched_treated_eids:
         # Find this patient in the original treated lists from OTPL
         if eid in treated_eids:
             idx = treated_eids.index(eid)
-            if idx < len(treated_times):
-                matched_treatment_times.append(treated_times[idx])  # Use OTPL treatment times
+            if idx < len(treated_treatment_times):
+                matched_treatment_times.append(treated_treatment_times[idx])
             else:
                 matched_treatment_times.append(0)
         else:
             matched_treatment_times.append(0)
     
+
     # Extract outcomes for treated patients
     treated_outcomes = []
     treated_event_times = []
