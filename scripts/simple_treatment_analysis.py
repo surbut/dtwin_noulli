@@ -109,7 +109,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
-                treatment_age = 30 + treatment_dates[treatment_idx]  # Convert time index to years
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
                 age = treatment_age  # Use treatment age for matching
             else:
                 age = age_at_enroll
@@ -134,7 +134,43 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         dm1 = covariate_dicts['dm1_prev'].get(int(eid))
         if dm1 is None or np.isnan(dm1):
             continue  # Skip this patient
-        
+
+
+
+         if Y is not None and event_indices is not None:
+            # Find this patient in Y tensor
+            y_idx = np.where(processed_ids == int(eid))[0][0]
+            
+            if is_treated and treatment_dates is not None:
+                # For treated patients: check events before treatment time
+                treatment_idx = eids.index(eid) if eid in eids else None
+                if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                    treatment_time = int(treatment_dates[treatment_idx])
+                    pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
+                    # Convert PyTorch tensor to NumPy if needed
+                    if hasattr(pre_treatment_events, 'detach'):
+                        pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
+                    if np.any(pre_treatment_events > 0):
+                        excluded_pre_events += 1
+                        continue  # Skip - had events before treatment
+                    
+                    # CRITICAL: Also exclude events within 1 year AFTER treatment (reverse causation)
+                    post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
+                    if hasattr(post_treatment_1yr, 'detach'):
+                        post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
+                    if np.any(post_treatment_1yr > 0):
+                        excluded_pre_events += 1
+                        continue  # Skip - had events within 1 year of treatment
+            else:
+                # For control patients: check events before enrollment time
+                pre_enrollment_events = Y[y_idx, event_indices, :t0]
+                # Convert PyTorch tensor to NumPy if needed
+                if hasattr(pre_enrollment_events, 'detach'):
+                    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
+                if np.any(pre_enrollment_events > 0):
+                    excluded_pre_events += 1
+                    continue  # Skip - had events before enrollment
+                    
         # EXCLUDE patients with CAD before treatment/enrollment (incident user logic)
         # Determine the reference age for CAD exclusion
         if is_treated and treatment_dates is not None:
@@ -143,7 +179,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
                 #treatment_age = age_at_enroll + treatment_dates[treatment_idx] / 12 # Convert time index to years
-                treatment_age = 30 + treatment_dates[treatment_idx] 
+                treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
                 reference_age = age_at_enroll
@@ -152,6 +188,9 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             reference_age = age_at_enroll
         
         # Check CAD exclusion (only exclude CAD before index date)
+
+
+        
         cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
         cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
         if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
@@ -833,16 +872,29 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                     post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
                 
                 event_occurred = np.any(post_treatment_outcomes > 0)
-                
+                max_followup = Y_np.shape[2] - int(index_time)
+                time_to_event_or_censor = min(5.0, max_followup)
+
                 if event_occurred:
-                    # Find time to first event
-                    event_times = np.where(post_treatment_outcomes > 0)[0]
-                    time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    # Use actual event time if it occurs within follow-up window
+                    event_times = np.where(post_outcomes > 0)[0]
+                    actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                    time_to_event = min(actual_event_time, time_to_event_or_censor)
                     treated_event_times.append(time_to_event)
                 else:
-                    # Censored at end of follow-up (minimum 5 years)
-                    time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+                    # Use full available follow-up time for censoring
+                    time_to_event = time_to_event_or_censor
                     treated_censoring_times.append(time_to_event)
+                
+                #if event_occurred:
+                    # Find time to first event
+                    #event_times = np.where(post_treatment_outcomes > 0)[0]
+                    #time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                    #treated_event_times.append(time_to_event)
+                #else:
+                    # Censored at end of follow-up (minimum 5 years)
+                   # time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+                   # treated_censoring_times.append(time_to_event)
                 
                 treated_outcomes.append(int(event_occurred))
                 follow_up_times.append(time_to_event)
