@@ -814,13 +814,16 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     print(f" DEBUG: Processing {len(matched_control_eids)} matched control patients for outcomes")
     
-    for i, (eid, t0) in enumerate(zip(matched_control_eids, 
-                                      [control_t0s[control_eids.index(eid)] for eid in matched_control_eids])):
+    for i, eid in enumerate(matched_control_eids):
         if i % 1000 == 0:
             print(f"   Processed {i} control patients...")
             
         # Find patient in Y tensor
         y_idx = np.where(processed_ids == int(eid))[0][0]
+        
+        # Get control t0 from the original control_t0s list
+        control_idx = kept_control_eids.index(eid)
+        t0 = control_t0s[control_idx]
         
         # Get outcomes after enrollment
         post_enrollment_outcomes = Y[y_idx, event_indices, t0:]
@@ -887,30 +890,24 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Calculate hazard ratio
     print("8. Calculating hazard ratio...")
-    hazard_ratio, ci_lower, ci_upper, p_value = calculate_hazard_ratio(
-        treated_outcomes, control_outcomes, 
-        [follow_up_times[i] for i in range(len(matched_treated_eids))],
-        [follow_up_times[i + len(matched_treated_eids)] for i in range(len(matched_control_eids))]
-    )
+    hr_results = calculate_hazard_ratio(treated_outcomes, control_outcomes, follow_up_times)
     
-    if hazard_ratio is None:
+    if hr_results is None:
         print("Error: Could not calculate hazard ratio")
         return None
     
     # Prepare results
     results = {
-        'hazard_ratio_results': {
-            'hazard_ratio': hazard_ratio,
-            'ci_lower': ci_lower,
-            'ci_upper': ci_upper,
-            'p_value': p_value
-        },
+        'hazard_ratio_results': hr_results,
         'matched_patients': {
-            'treated': matched_treated_eids,
-            'controls': matched_control_eids,
+            'treated_eids': matched_treated_eids,
+            'control_eids': matched_control_eids,
             'pairs': matched_pairs
         },
-        'treatment_times': matched_treatment_times,
+        'treatment_times': {
+            'treated_times': matched_treatment_times,
+            'control_times': [control_t0s[kept_control_eids.index(eid)] for eid in matched_control_eids]
+        },
         'cohort_sizes': {
             'treated': len(matched_treated_eids),
             'controls': len(matched_control_eids),
