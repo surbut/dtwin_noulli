@@ -283,6 +283,57 @@ from sklearn.metrics.pairwise import euclidean_distances
 from scipy.optimize import linear_sum_assignment
 import time
 
+
+def perform_greedy_1to1_matching_fast(treated_features, control_features, 
+                                     treated_indices, control_indices,
+                                     treated_eids, control_eids):
+    """
+    Fast greedy matching using vectorized operations
+    """
+    from sklearn.metrics.pairwise import euclidean_distances
+    
+    print(f"Starting fast greedy matching: {len(treated_features)} treated, {len(control_features)} controls")
+    
+    # Standardize features
+    scaler = StandardScaler()
+    treated_features_std = scaler.fit_transform(treated_features)
+    control_features_std = scaler.transform(control_features)
+    
+    # Use sklearn's fast pairwise distance calculation
+    print("Calculating distance matrix (vectorized)...")
+    distances = euclidean_distances(treated_features_std, control_features_std)
+    
+    # Greedy matching
+    matched_treated_indices = []
+    matched_control_indices = []
+    matched_treated_eids = []
+    matched_control_eids = []
+    
+    # Track which controls are still available
+    available_controls = list(range(len(control_features)))
+    
+    # Match each treated patient to best available control
+    for i in range(len(treated_features)):
+        if not available_controls:
+            break
+            
+        # Find best available control using vectorized operations
+        best_control_idx = available_controls[np.argmin(distances[i, available_controls])]
+        
+        # Add to matches
+        matched_treated_indices.append(treated_indices[i])
+        matched_control_indices.append(control_indices[best_control_idx])
+        matched_treated_eids.append(treated_eids[i])
+        matched_control_eids.append(control_eids[best_control_idx])
+        
+        # Remove this control from available pool
+        available_controls.remove(best_control_idx)
+    
+    print(f"Fast greedy matching complete: {len(matched_treated_indices)} pairs")
+    
+    return (matched_treated_indices, matched_control_indices, 
+            matched_treated_eids, matched_control_eids)
+            
 def perform_matching_fast(treated_features, control_features, treated_eids, control_eids,
                          treated_indices, control_indices, method='nearest'):
     """
