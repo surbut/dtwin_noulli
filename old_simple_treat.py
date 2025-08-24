@@ -943,7 +943,8 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     else:
         print(f"   ✅ PASSED: All patients properly excluded for CAD before index date")
     
-    # 4. Overall verification
+  
+                              # 4. Overall verification
     print("4. Overall verification...")
     verification_passed = (final_control_statin_check == 0 and 
                           (Y is None or event_indices is None or 
@@ -956,7 +957,98 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     else:
         print("   ❌ VERIFICATION FAILED - investigate issues above")
     
+    # 5. Check for duplications in cases or controls
+    print("5. Duplication check...")
+    treated_duplicates = len(matched_treated_eids) - len(set(matched_treated_eids))
+    control_eids_matched = [kept_control_eids[j] for _, j in matched_pairs]
+    control_duplicates = len(control_eids_matched) - len(set(control_eids_matched))
+    
+    if treated_duplicates > 0:
+        print(f"   ❌ FAILED: {treated_duplicates} duplicate treated patients!")
+        # Show the duplicates
+        from collections import Counter
+        treated_counts = Counter(matched_treated_eids)
+        duplicates = [eid for eid, count in treated_counts.items() if count > 1]
+        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
+    else:
+        print("   ✅ PASSED: No duplicate treated patients")
+        
+    if control_duplicates > 0:
+        print(f"   ❌ FAILED: {control_duplicates} duplicate control patients!")
+        # Show the duplicates
+        control_counts = Counter(control_eids_matched)
+        duplicates = [eid for eid, count in control_counts.items() if count > 1]
+        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
+    else:
+        print("   ✅ PASSED: No duplicate control patients")
+    
+    # 6. Global/Local ID alignment verification
+    print("6. Global/Local ID alignment verification...")
+    id_alignment_errors = 0
+    
+    # Check treated patients
+    for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
+        # Verify global ID matches processed_ids
+        try:
+            global_idx = np.where(processed_ids == int(eid))[0][0]
+        except IndexError:
+            print(f"   ❌ ERROR: Treated patient {eid} not found in processed_ids")
+            id_alignment_errors += 1
+            continue
+            
+        # Verify covariate data exists for this global ID
+        if int(eid) not in covariate_dicts['age_at_enroll']:
+            print(f"   ❌ ERROR: Treated patient {eid} missing age data")
+            id_alignment_errors += 1
+            continue
+            
+        if int(eid) not in covariate_dicts['sex']:
+            print(f"   ❌ ERROR: Treated patient {eid} missing sex data")
+            id_alignment_errors += 1
+            continue
+    
+    # Check control patients
+    for _, j in matched_pairs:
+        control_eid = kept_control_eids[j]
+        
+        # Verify global ID matches processed_ids
+        try:
+            global_idx = np.where(processed_ids == int(control_eid))[0][0]
+        except IndexError:
+            print(f"   ❌ ERROR: Control patient {control_eid} not found in processed_ids")
+            id_alignment_errors += 1
+            continue
+            
+        # Verify covariate data exists for this global ID
+        if int(control_eid) not in covariate_dicts['age_at_enroll']:
+            print(f"   ❌ ERROR: Control patient {control_eid} missing age data")
+            id_alignment_errors += 1
+            continue
+            
+        if int(control_eid) not in covariate_dicts['sex']:
+            print(f"   ❌ ERROR: Control patient {control_eid} missing sex data")
+            id_alignment_errors += 1
+            continue
+    
+    if id_alignment_errors == 0:
+        print("   ✅ PASSED: All global/local ID alignments verified")
+        print("   ✅ All matched patients have corresponding covariate data")
+    else:
+        print(f"   ❌ FAILED: {id_alignment_errors} ID alignment errors found")
+    
+    # Update overall verification
+    verification_passed = (verification_passed and 
+                          treated_duplicates == 0 and 
+                          control_duplicates == 0 and 
+                          id_alignment_errors == 0)
+    
+    if verification_passed:
+        print("\n   🎉 ALL VERIFICATION CHECKS PASSED - ANALYSIS IS CLEAN!")
+    else:
+        print("\n   ⚠️ VERIFICATION FAILED - investigate issues above")
+    
     return results
+    
 
 def verify_analysis(results, expected_hr=0.75, tolerance=0.1):
     """
