@@ -730,9 +730,9 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         print(f"   Sex difference: {abs(treated_sex_mean - control_sex_mean)*100:.1f}%")
     
     # Perform matching
+
+        # Perform matching
     print("5. Performing matching...")
-    
-   
     
     matched_treated_indices, matched_control_indices, matched_treated_eids, matched_control_eids = perform_greedy_1to1_matching_fast(
         treated_features, control_features, treated_indices, control_indices,
@@ -742,6 +742,9 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     if len(matched_treated_indices) == 0:
         print("Error: No matches found")
         return None
+    
+    # Create matched_pairs for compatibility with existing code
+    matched_pairs = list(zip(range(len(matched_treated_indices)), range(len(matched_control_indices))))
     
     # Extract outcomes for matched patients
     print("6. Extracting outcomes...")
@@ -759,14 +762,13 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         else:
             matched_treatment_times.append(0)
     
-
     # Extract outcomes for treated patients
     treated_outcomes = []
     treated_event_times = []
     treated_censoring_times = []
     follow_up_times = []
     
-    print(f" DEBUG: Processing {len(matched_treated)} matched treated patients for outcomes")
+    print(f" DEBUG: Processing {len(matched_treated_eids)} matched treated patients for outcomes")
     
     for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
         if i % 1000 == 0:
@@ -810,10 +812,10 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     control_event_times = []
     control_censoring_times = []
     
-    print(f" DEBUG: Processing {len(matched_controls)} matched control patients for outcomes")
+    print(f" DEBUG: Processing {len(matched_control_eids)} matched control patients for outcomes")
     
-    for i, (eid, t0) in enumerate(zip([kept_control_eids[j] for _, j in matched_pairs], 
-                                      [control_t0s[j] for _, j in matched_pairs])):
+    for i, (eid, t0) in enumerate(zip(matched_control_eids, 
+                                      [control_t0s[control_eids.index(eid)] for eid in matched_control_eids])):
         if i % 1000 == 0:
             print(f"   Processed {i} control patients...")
             
@@ -851,7 +853,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         follow_up_times.append(time_to_event)
     
     # VERIFICATION: Check covariate balance after matching
-    print("6. Assessing covariate balance after matching...")
+    print("7. Assessing covariate balance after matching...")
     if len(matched_pairs) > 0:
         # Get matched features
         matched_treated_features = treated_features[[i for i, _ in matched_pairs]]
@@ -884,11 +886,11 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             print(f"   ⚠️ Sex balance worsened by {abs(sex_improvement)*100:.1f}%")
     
     # Calculate hazard ratio
-    print("7. Calculating hazard ratio...")
+    print("8. Calculating hazard ratio...")
     hazard_ratio, ci_lower, ci_upper, p_value = calculate_hazard_ratio(
         treated_outcomes, control_outcomes, 
-        [follow_up_times[i] for i in range(len(matched_treated))],
-        [follow_up_times[i + len(matched_treated)] for i in range(len(matched_controls))]
+        [follow_up_times[i] for i in range(len(matched_treated_eids))],
+        [follow_up_times[i + len(matched_treated_eids)] for i in range(len(matched_control_eids))]
     )
     
     if hazard_ratio is None:
@@ -904,15 +906,15 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             'p_value': p_value
         },
         'matched_patients': {
-            'treated': matched_treated,
-            'controls': matched_controls,
+            'treated': matched_treated_eids,
+            'controls': matched_control_eids,
             'pairs': matched_pairs
         },
         'treatment_times': matched_treatment_times,
         'cohort_sizes': {
-            'treated': len(matched_treated),
-            'controls': len(matched_controls),
-            'total': len(matched_treated) + len(matched_controls)
+            'treated': len(matched_treated_eids),
+            'controls': len(matched_control_eids),
+            'total': len(matched_treated_eids) + len(matched_control_eids)
         },
         'matching_features': {
             'treated': treated_features[[i for i, _ in matched_pairs]],
@@ -926,7 +928,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         'treated_outcomes': treated_outcomes,
         'control_outcomes': control_outcomes
     }
-    
+   
     # Print summary
     print("\n=== ANALYSIS SUMMARY ===")
     print(f"Matched pairs: {len(matched_pairs):,}")
