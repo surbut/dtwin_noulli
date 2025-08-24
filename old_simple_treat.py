@@ -521,20 +521,6 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         else:
             raise ValueError("Covariates not available for OTPL")
         
-    except (ImportError, ValueError, AttributeError) as e:
-        print(f"Warning: Using fallback method due to: {e}")
-        # Fallback: simple extraction
-        treated_eids = list(true_statins.keys())
-        treated_t0s = [true_statins[eid]['t0'] for eid in treated_eids]
-        treated_treatment_times = [true_statins[eid]['treatment_time'] for eid in treated_eids]
-        
-        # Simple control extraction (no statins ever)
-        all_eids = set(processed_ids)
-        treated_set = set(treated_eids)
-        control_eids = list(all_eids - treated_set)
-        
-        
-        print(f"Fallback: {len(treated_eids)} treated, {len(control_eids)} control patients")
 
     # Now calculate control timing once for both paths
     control_t0s = []
@@ -618,11 +604,18 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     print("4. Extracting outcomes...")
     
     # Get treatment times for matched treated patients
+ # Get treatment times for matched treated patients from OTPL
     matched_treated_eids = [kept_treated_eids[i] for i, _ in matched_pairs]
     matched_treatment_times = []
+
     for eid in matched_treated_eids:
-        if eid in true_statins:
-            matched_treatment_times.append(true_statins[eid]['treatment_time'])
+        # Find this patient in the original treated lists from OTPL
+        if eid in treated_eids:
+            idx = treated_eids.index(eid)
+            if idx < len(treated_times):
+                matched_treatment_times.append(treated_times[idx])  # Use OTPL treatment times
+            else:
+                matched_treatment_times.append(0)
         else:
             matched_treatment_times.append(0)
     

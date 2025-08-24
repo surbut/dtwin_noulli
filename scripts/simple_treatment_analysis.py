@@ -109,7 +109,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
-                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
+                treatment_age = 30 + treatment_dates[treatment_idx]  # Convert time index to years
                 age = treatment_age  # Use treatment age for matching
             else:
                 age = age_at_enroll
@@ -143,7 +143,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
                 #treatment_age = age_at_enroll + treatment_dates[treatment_idx] / 12 # Convert time index to years
-                treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
+                treatment_age = 30 + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
                 reference_age = age_at_enroll
@@ -660,6 +660,7 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     print("\n4. Building features for treated patients:")
     # Use same sig_indices logic as comprehensive analysis
     #sig_indices = [5] if event_indices is not None else None
+    # treated times is index from 30!
     treated_features, treated_indices, treated_eids_matched = build_features(
         treated_eids, treated_times, processed_ids, thetas, 
         covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times
@@ -991,7 +992,7 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                 },
                 'treatment_times': {
                     'treated_times': [treated_times[i] for i, eid in enumerate(treated_eids) if eid in matched_treated_eids],
-                    'control_times': [control_t0s[i] for i, eid in enumerate(valid_control_eids) if eid in matched_control_eids]
+                    'control_times': [control_t0s[valid_control_eids.index(eid)] for eid in matched_control_eids]
                 },
                 'cohort_sizes': {
                     'n_treated': len(matched_treated_eids),
