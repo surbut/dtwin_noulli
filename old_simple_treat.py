@@ -130,13 +130,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     excluded_pre_events += 1
                     continue  # Skip - had events before enrollment
                     
-                # CRITICAL: Also exclude events within 1 year AFTER enrollment (reverse causation)
-                post_enrollment_1yr = Y[y_idx, event_indices, t0:min(t0 + 1, Y.shape[2])]
-                if hasattr(post_enrollment_1yr, 'detach'):
-                    post_enrollment_1yr = post_enrollment_1yr.detach().cpu().numpy()
-                if np.any(post_enrollment_1yr > 0):
-                    excluded_pre_events += 1
-                    continue  # Skip - had events within 1 year of enrollment
+                # NOTE: No 1-year exclusion for controls - they can have early events naturally
         
   
 
@@ -371,20 +365,36 @@ def perform_greedy_1to1_matching_fast(treated_features, control_features,
                                      treated_indices, control_indices,
                                      treated_eids, control_eids):
     """
-    Fast greedy matching using vectorized operations
+    Fast greedy matching using vectorized operations with age/sex prioritization
     """
     from sklearn.metrics.pairwise import euclidean_distances
     
     print(f"Starting fast greedy matching: {len(treated_features)} treated, {len(control_features)} controls")
     
-    # Standardize features
+    # Extract clinical features (age, sex) - these are the last 2 features
+    treated_clinical = treated_features[:, -2:]  # Age and sex
+    control_clinical = control_features[:, -2:]
+    
+    # Standardize clinical features separately for better balance
+    clinical_scaler = StandardScaler()
+    treated_clinical_std = clinical_scaler.fit_transform(treated_clinical)
+    control_clinical_std = clinical_scaler.transform(control_clinical)
+    
+    # Calculate clinical distance matrix (age + sex)
+    clinical_distances = euclidean_distances(treated_clinical_std, control_clinical_std)
+    
+    # Standardize all features for overall matching
     scaler = StandardScaler()
     treated_features_std = scaler.fit_transform(treated_features)
     control_features_std = scaler.transform(control_features)
     
-    # Use sklearn's fast pairwise distance calculation
-    print("Calculating distance matrix (vectorized)...")
-    distances = euclidean_distances(treated_features_std, control_features_std)
+    # Calculate overall distance matrix
+    overall_distances = euclidean_distances(treated_features_std, control_features_std)
+    
+    # Combine distances: 70% clinical (age/sex), 30% signatures
+    combined_distances = 0.7 * clinical_distances + 0.3 * overall_distances
+    
+    print("Calculating combined distance matrix (prioritizing age/sex)...")
     
     # Greedy matching
     matched_treated_indices = []
@@ -400,8 +410,8 @@ def perform_greedy_1to1_matching_fast(treated_features, control_features,
         if not available_controls:
             break
             
-        # Find best available control using vectorized operations
-        best_control_idx = available_controls[np.argmin(distances[i, available_controls])]
+        # Find best available control using combined distances
+        best_control_idx = available_controls[np.argmin(combined_distances[i, available_controls])]
         
         # Add to matches
         matched_treated_indices.append(treated_indices[i])
@@ -665,25 +675,25 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         # Check for events within 5-year window ONLY
         post_enrollment_outcomes_5yr = post_enrollment_outcomes[:5]  # Only first 5 years
         event_occurred = np.any(post_enrollment_outcomes_5yr > 0)
-                    
-                    if event_occurred:
-                        # Find time to first event within 5 years
-                        event_times = np.where(post_enrollment_outcomes_5yr > 0)[0]
-                        if len(event_times) > 0 and event_times[0] < 5:
-                            time_to_event = event_times[0]
-                            control_event_times.append(time_to_event)
-                        else:
-                            # Event happened after 5 years - censor at 5 years
-                            time_to_event = 5.0
-                            control_censoring_times.append(time_to_event)
-                            event_occurred = False  # Don't count as event
-                    else:
-                        # Censored at 5 years (no events within 5 years)
-                        time_to_event = 5.0
-                        control_censoring_times.append(time_to_event)
-                    
-                    control_outcomes.append(int(event_occurred))
-                    follow_up_times.append(time_to_event)
+        
+        if event_occurred:
+            # Find time to first event within 5 years
+            event_times = np.where(post_enrollment_outcomes_5yr > 0)[0]
+            if len(event_times) > 0 and event_times[0] < 5:
+                time_to_event = event_times[0]
+                control_event_times.append(time_to_event)
+            else:
+                # Event happened after 5 years - censor at 5 years
+                time_to_event = 5.0
+                control_censoring_times.append(time_to_event)
+                event_occurred = False  # Don't count as event
+        else:
+            # Censored at 5 years (no events within 5 years)
+            time_to_event = 5.0
+            control_censoring_times.append(time_to_event)
+        
+        control_outcomes.append(int(event_occurred))
+        follow_up_times.append(time_to_event)
         
     # VERIFICATION: Check covariate balance after matching
     print("7. Assessing covariate balance after matching...")
