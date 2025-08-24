@@ -417,188 +417,6 @@ def perform_greedy_1to1_matching_fast(treated_features, control_features,
     return (matched_treated_indices, matched_control_indices, 
             matched_treated_eids, matched_control_eids)
 
-def perform_matching_fast(treated_features, control_features, treated_eids, control_eids,
-                         treated_indices, control_indices, method='nearest'):
-    """
-    Fast matching implementation with multiple methods
-    """
-    
-    if method == 'nearest':
-        # Original nearest neighbor (allows repetition)
-        scaler = StandardScaler()
-        treated_features_std = scaler.fit_transform(treated_features)
-        control_features_std = scaler.transform(control_features)
-        
-        # Perform nearest neighbor matching
-        nn = NearestNeighbors(n_neighbors=1, algorithm='auto').fit(control_features_std)
-        distances, indices = nn.kneighbors(treated_features_std)
-        
-        # Extract matched pairs
-        matched_control_indices = [control_indices[i] for i in indices.flatten()]
-        matched_treated_indices = treated_indices
-        matched_control_eids = [control_eids[i] for i in indices.flatten()]
-        matched_treated_eids = treated_eids
-        
-        return (matched_treated_indices, matched_control_indices, 
-                matched_treated_eids, matched_control_eids)
-            
-    elif method == 'hungarian':
-        # Hungarian algorithm for optimal assignment (no repetition)
-        scaler = StandardScaler()
-        treated_scaled = scaler.fit_transform(treated_features)
-        control_scaled = scaler.transform(control_features)
-        
-        # Compute distance matrix
-        distance_matrix = euclidean_distances(treated_scaled, control_scaled)
-        
-        # Hungarian algorithm
-        treated_idx, control_idx = linear_sum_assignment(distance_matrix)
-        
-        matched_treated_indices = [treated_indices[i] for i in treated_idx]
-        matched_control_indices = [control_indices[i] for i in control_idx]
-        matched_treated_eids = [treated_eids[i] for i in treated_idx]
-        matched_control_eids = [control_eids[i] for i in control_idx]
-        
-        return (matched_treated_indices, matched_control_indices, 
-                matched_treated_eids, matched_control_eids)
-        
-    elif method == 'greedy_vectorized':
-        # Fast greedy using vectorized operations
-        scaler = StandardScaler()
-        treated_scaled = scaler.fit_transform(treated_features)
-        control_scaled = scaler.transform(control_features)
-        
-        matched_treated_indices = []
-        matched_control_indices = []
-        matched_treated_eids = []
-        matched_control_eids = []
-        
-        # Keep track of available controls
-        available_controls = np.arange(len(control_scaled))
-        available_control_features = control_scaled.copy()
-        
-        for i, treated_feat in enumerate(treated_scaled):
-            if len(available_controls) == 0:
-                break
-                
-            # Vectorized distance calculation
-            distances = np.linalg.norm(available_control_features - treated_feat, axis=1)
-            best_idx = np.argmin(distances)
-            best_control = available_controls[best_idx]
-            
-            matched_treated_indices.append(treated_indices[i])
-            matched_control_indices.append(control_indices[best_control])
-            matched_treated_eids.append(treated_eids[i])
-            matched_control_eids.append(control_eids[best_control])
-            
-            # Remove the matched control
-            mask = np.arange(len(available_controls)) != best_idx
-            available_controls = available_controls[mask]
-            available_control_features = available_control_features[mask]
-        
-        return (matched_treated_indices, matched_control_indices, 
-                matched_treated_eids, matched_control_eids)
-            
-    elif method == 'kd_tree_greedy':
-        # Use KD-tree for faster nearest neighbor search in greedy
-        scaler = StandardScaler()
-        treated_scaled = scaler.fit_transform(treated_features)
-        control_scaled = scaler.transform(control_features)
-        
-        matched_treated_indices = []
-        matched_control_indices = []
-        matched_treated_eids = []
-        matched_control_eids = []
-        
-        # Available controls
-        available_indices = list(range(len(control_scaled)))
-        available_features = control_scaled.copy()
-        
-        for i, treated_feat in enumerate(treated_scaled):
-            if len(available_indices) == 0:
-                break
-                
-            # Build KD-tree for current available controls
-            nbrs = NearestNeighbors(n_neighbors=1, algorithm='kd_tree')
-            nbrs.fit(available_features)
-            
-            # Find nearest neighbor
-            distances, indices = nbrs.kneighbors([treated_feat])
-            best_local_idx = indices[0][0]
-            best_control_idx = available_indices[best_local_idx]
-            
-            matched_treated_indices.append(treated_indices[i])
-            matched_control_indices.append(control_indices[best_control_idx])
-            matched_treated_eids.append(treated_eids[i])
-            matched_control_eids.append(control_eids[best_control_idx])
-            
-            # Remove the matched control
-            available_indices.pop(best_local_idx)
-            available_features = np.delete(available_features, best_local_idx, axis=0)
-        
-        return (matched_treated_indices, matched_control_indices, 
-                matched_treated_eids, matched_control_eids)
-    
-    elif method == 'batch_greedy':
-        # Process in batches for memory efficiency
-        scaler = StandardScaler()
-        treated_scaled = scaler.fit_transform(treated_features)
-        control_scaled = scaler.transform(control_features)
-        
-        matched_treated_indices = []
-        matched_control_indices = []
-        matched_treated_eids = []
-        matched_control_eids = []
-        used_controls = set()
-        
-        batch_size = 1000  # Process 1000 treated at a time
-        
-        for batch_start in range(0, len(treated_scaled), batch_size):
-            batch_end = min(batch_start + batch_size, len(treated_scaled))
-            treated_batch = treated_scaled[batch_start:batch_end]
-            
-            # Get available controls
-            available_controls = [i for i in range(len(control_scaled)) if i not in used_controls]
-            if len(available_controls) == 0:
-                break
-                
-            available_features = control_scaled[available_controls]
-            
-            # Compute distances for entire batch
-            distances = euclidean_distances(treated_batch, available_features)
-            
-            # Greedy assignment within batch
-            for i, dist_row in enumerate(distances):
-                if len(available_controls) == 0:
-                    break
-                    
-                # Find best available match
-                best_local_idx = np.argmin(dist_row)
-                best_control_idx = available_controls[best_local_idx]
-                
-                actual_treated_idx = batch_start + i
-                matched_treated_indices.append(treated_indices[actual_treated_idx])
-                matched_control_indices.append(control_indices[best_control_idx])
-                matched_treated_eids.append(treated_eids[actual_treated_idx])
-                matched_control_eids.append(control_eids[best_control_idx])
-                
-                # Remove from available
-                used_controls.add(best_control_idx)
-                available_controls.remove(best_control_idx)
-                
-                # Update distance row to ignore this control
-                dist_row[best_local_idx] = np.inf
-        
-        return (matched_treated_indices, matched_control_indices, 
-                matched_treated_eids, matched_control_eids)
-    
-    else:
-        raise ValueError(f"Unknown method: {method}")
-    
-    print(f"Matched {len(matched_treated_indices)} pairs using {method} method")
-    return (matched_treated_indices, matched_control_indices, 
-            matched_treated_eids, matched_control_eids)
-
 
 def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, sig_indices, 
                             covariate_dicts, Y=None, event_indices=None, cov=None):
@@ -622,7 +440,6 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     print("=== SIMPLIFIED TREATMENT ANALYSIS ===")
     
     # Extract treated and control patients
-    # Extract treated and control patients
     print("1. Extracting patient cohorts...")
     
     # Use ObservationalTreatmentPatternLearner if available
@@ -631,6 +448,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         
         # Check if we have the required data for OTPL
         if 'cov' in locals() and cov is not None:
+            print("   Setting up OTPL...")
             otpl = ObservationalTreatmentPatternLearner(
                 signature_loadings=thetas,
                 processed_ids=processed_ids,
@@ -639,7 +457,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
                 gp_scripts=gp_scripts
             )
 
-           
+            print("   Getting treatment patterns from OTPL...")
             # Get the treatment patterns from the OTPL
             patterns = otpl.treatment_patterns
             treated_eids = patterns['treated_patients']
@@ -649,14 +467,14 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
             # For treated patients, t0 is treatment time
             treated_t0s = treated_treatment_times.copy()
   
-            
-            print(f"Extracted {len(treated_eids)} treated patients and {len(control_eids)} control patients")
-            print(f"Control patients with valid timing: {len(control_eids)}")
+            print(f"   Extracted {len(treated_eids)} treated patients and {len(control_eids)} control patients")
+            print(f"   Treated treatment times range: {min(treated_treatment_times)} to {max(treated_treatment_times)}")
         else:
             raise ValueError("Covariates not available for OTPL")
         
 
         # Now calculate control timing once for both paths
+        print("   Calculating control timing...")
         control_t0s = []
         valid_control_eids = []
         
@@ -672,29 +490,34 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
                 continue
         
         control_eids = valid_control_eids
-        print(f"Control patients with valid timing: {len(control_eids)}")
+        print(f"   Control patients with valid timing: {len(control_eids)}")
+        if len(control_eids) > 0:
+            print(f"   Control t0s range: {min(control_t0s)} to {max(control_t0s)}")
 
     except Exception as e:
         print(f"Error setting up OTPL: {e}")
+        import traceback
+        traceback.print_exc()
         return None
     
 
 
     # Build features with exclusions
     print("2. Building features with exclusions...")
+    print(f"   Building treated features for {len(treated_eids)} patients...")
     treated_features, treated_indices, kept_treated_eids = build_features(
         treated_eids, treated_t0s, processed_ids, thetas, covariate_dicts, 
         sig_indices, is_treated=True, treatment_dates=treated_treatment_times,
         Y=Y, event_indices=event_indices
     )
     
+    print(f"   Building control features for {len(control_eids)} patients...")
     control_features, control_indices, kept_control_eids = build_features(
         control_eids, control_t0s, processed_ids, thetas, covariate_dicts, 
         sig_indices, is_treated=False, Y=Y, event_indices=event_indices
     )
 
     print(f"   Treated patients after exclusions: {len(treated_features):,}")
-    
     print(f"   Control patients after exclusions: {len(control_features):,}")
     
     if len(treated_features) == 0 or len(control_features) == 0:
@@ -731,13 +554,17 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     
     # Perform matching
 
-        # Perform matching
     print("5. Performing matching...")
+    print(f"   Input: {len(treated_features)} treated features, {len(control_features)} control features")
+    print(f"   Input: {len(treated_indices)} treated indices, {len(control_indices)} control indices")
+    print(f"   Input: {len(kept_treated_eids)} treated EIDs, {len(kept_control_eids)} control EIDs")
     
     matched_treated_indices, matched_control_indices, matched_treated_eids, matched_control_eids = perform_greedy_1to1_matching_fast(
         treated_features, control_features, treated_indices, control_indices,
         kept_treated_eids, kept_control_eids
     )
+    
+    print(f"   Output: {len(matched_treated_indices)} matched treated, {len(matched_control_indices)} matched controls")
     
     if len(matched_treated_indices) == 0:
         print("Error: No matches found")
@@ -896,6 +723,211 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
         print("Error: Could not calculate hazard ratio")
         return None
     
+    # COMPREHENSIVE VERIFICATION
+    print("\n=== COMPREHENSIVE VERIFICATION ===")
+    
+    # 1. Check for statin contamination in final matched control group
+    print("1. Final statin contamination check...")
+    final_control_statin_check = 0
+    for _, j in matched_pairs:
+        control_eid = kept_control_eids[j]
+        if control_eid in true_statins:
+            final_control_statin_check += 1
+            print(f"   CRITICAL: Matched control {control_eid} has statin prescription!")
+    
+    if final_control_statin_check > 0:
+        print(f"   ❌ CRITICAL ERROR: {final_control_statin_check} matched controls have statin prescriptions!")
+        print("   This indicates a fundamental flaw in control group definition!")
+    else:
+        print("   ✅ No statin contamination in final matched control group")
+    
+    # 2. Check for pre-treatment/enrollment events in final matched groups
+    print("2. Final pre-index event check...")
+    if Y is not None and event_indices is not None:
+        treated_pre_events_final = 0
+        control_pre_events_final = 0
+        treated_1yr_events_final = 0
+        control_1yr_events_final = 0
+        
+        # Check treated patients
+        for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
+            y_idx = np.where(processed_ids == int(eid))[0][0]
+            pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
+            if hasattr(pre_treatment_events, 'detach'):
+                pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
+            if np.any(pre_treatment_events > 0):
+                treated_pre_events_final += 1
+            
+            # Check events within 1 year after treatment
+            post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
+            if hasattr(post_treatment_1yr, 'detach'):
+                post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
+            if np.any(post_treatment_1yr > 0):
+                treated_1yr_events_final += 1
+        
+        # Check control patients
+        for _, j in matched_pairs:
+            control_eid = kept_control_eids[j]
+            control_t0 = control_t0s[kept_control_eids.index(control_eid)]
+            y_idx = np.where(processed_ids == int(control_eid))[0][0]
+            pre_enrollment_events = Y[y_idx, event_indices, :control_t0]
+            if hasattr(pre_enrollment_events, 'detach'):
+                pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
+            if np.any(pre_enrollment_events > 0):
+                control_pre_events_final += 1
+            
+            # Check events within 1 year after enrollment
+            post_enrollment_1yr = Y[y_idx, event_indices, control_t0:min(control_t0 + 1, Y.shape[2])]
+            if hasattr(post_enrollment_1yr, 'detach'):
+                post_enrollment_1yr = post_enrollment_1yr.detach().cpu().numpy()
+            if np.any(post_enrollment_1yr > 0):
+                control_1yr_events_final += 1
+        
+        print(f"   Treated patients with pre-treatment events: {treated_pre_events_final}")
+        print(f"   Control patients with pre-enrollment events: {control_pre_events_final}")
+        print(f"   Treated patients with events within 1 year: {treated_1yr_events_final}")
+        print(f"   Control patients with events within 1 year: {control_1yr_events_final}")
+        
+        if treated_pre_events_final > 0 or control_pre_events_final > 0:
+            print("   ❌ FAILED: Pre-index events found in final matched groups!")
+        else:
+            print("   ✅ PASSED: No pre-index events in final matched groups")
+            
+        if treated_1yr_events_final > 0 or control_1yr_events_final > 0:
+            print("   ❌ FAILED: Events within 1 year found in final matched groups!")
+        else:
+            print("   ✅ PASSED: No events within 1 year in final matched groups")
+    
+    # 3. Check CAD exclusion
+    print("3. CAD exclusion verification...")
+    cad_exclusion_failed = 0
+    for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
+        if eid in true_statins:
+            treatment_age = 30 + treatment_time
+            cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
+            cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
+            if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
+                if cad_censor_age < treatment_age:
+                    cad_exclusion_failed += 1
+    
+    for _, j in matched_pairs:
+        control_eid = kept_control_eids[j]
+        control_t0 = control_t0s[kept_control_eids.index(control_eid)]
+        enrollment_age = covariate_dicts['age_at_enroll'].get(int(control_eid), 57)
+        cad_any = covariate_dicts.get('Cad_Any', {}).get(int(control_eid), 0)
+        cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(control_eid))
+        if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
+            if cad_censor_age < enrollment_age:
+                cad_exclusion_failed += 1
+    
+    if cad_exclusion_failed > 0:
+        print(f"   ❌ FAILED: {cad_exclusion_failed} patients with CAD before index date!")
+    else:
+        print(f"   ✅ PASSED: All patients properly excluded for CAD before index date")
+    
+    # 4. Overall verification
+    print("4. Overall verification...")
+    verification_passed = (final_control_statin_check == 0 and 
+                          (Y is None or event_indices is None or 
+                           (treated_pre_events_final == 0 and control_pre_events_final == 0 and
+                            treated_1yr_events_final == 0 and control_1yr_events_final == 0)) and
+                          cad_exclusion_failed == 0)
+    
+    if verification_passed:
+        print("   ✅ ALL VERIFICATION CHECKS PASSED")
+    else:
+        print("   ❌ VERIFICATION FAILED - investigate issues above")
+    
+    # 5. Check for duplications in cases or controls
+    print("5. Duplication check...")
+    treated_duplicates = len(matched_treated_eids) - len(set(matched_treated_eids))
+    control_eids_matched = [kept_control_eids[j] for _, j in matched_pairs]
+    control_duplicates = len(control_eids_matched) - len(set(control_eids_matched))
+    
+    if treated_duplicates > 0:
+        print(f"   ❌ FAILED: {treated_duplicates} duplicate treated patients!")
+        # Show the duplicates
+        from collections import Counter
+        treated_counts = Counter(matched_treated_eids)
+        duplicates = [eid for eid, count in treated_counts.items() if count > 1]
+        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
+    else:
+        print("   ✅ PASSED: No duplicate treated patients")
+        
+    if control_duplicates > 0:
+        print(f"   ❌ FAILED: {control_duplicates} duplicate control patients!")
+        # Show the duplicates
+        control_counts = Counter(control_eids_matched)
+        duplicates = [eid for eid, count in control_counts.items() if count > 1]
+        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
+    else:
+        print("   ✅ PASSED: No duplicate control patients")
+    
+    # 6. Global/Local ID alignment verification
+    print("6. Global/Local ID alignment verification...")
+    id_alignment_errors = 0
+    
+    # Check treated patients
+    for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
+        # Verify global ID matches processed_ids
+        try:
+            global_idx = np.where(processed_ids == int(eid))[0][0]
+        except IndexError:
+            print(f"   ❌ ERROR: Treated patient {eid} not found in processed_ids")
+            id_alignment_errors += 1
+            continue
+            
+        # Verify covariate data exists for this global ID
+        if int(eid) not in covariate_dicts['age_at_enroll']:
+            print(f"   ❌ ERROR: Treated patient {eid} missing age data")
+            id_alignment_errors += 1
+            continue
+            
+        if int(eid) not in covariate_dicts['sex']:
+            print(f"   ❌ ERROR: Treated patient {eid} missing sex data")
+            id_alignment_errors += 1
+            continue
+    
+    # Check control patients
+    for _, j in matched_pairs:
+        control_eid = kept_control_eids[j]
+        
+        # Verify global ID matches processed_ids
+        try:
+            global_idx = np.where(processed_ids == int(control_eid))[0][0]
+        except IndexError:
+            print(f"   ❌ ERROR: Control patient {control_eid} not found in processed_ids")
+            id_alignment_errors += 1
+            continue
+            
+        # Verify covariate data exists for this global ID
+        if int(control_eid) not in covariate_dicts['age_at_enroll']:
+            print(f"   ❌ ERROR: Control patient {control_eid} missing age data")
+            id_alignment_errors += 1
+            continue
+            
+        if int(control_eid) not in covariate_dicts['sex']:
+            print(f"   ❌ ERROR: Control patient {control_eid} missing sex data")
+            id_alignment_errors += 1
+            continue
+    
+    if id_alignment_errors == 0:
+        print("   ✅ PASSED: All global/local ID alignments verified")
+        print("   ✅ All matched patients have corresponding covariate data")
+    else:
+        print(f"   ❌ FAILED: {id_alignment_errors} ID alignment errors found")
+    
+    # Update overall verification
+    verification_passed = (verification_passed and 
+                          treated_duplicates == 0 and 
+                          control_duplicates == 0 and 
+                          id_alignment_errors == 0)
+    
+    if verification_passed:
+        print("\n   🎉 ALL VERIFICATION CHECKS PASSED - ANALYSIS IS CLEAN!")
+    else:
+        print("\n   ⚠️ VERIFICATION FAILED - investigate issues above")
+    
     # Prepare results
     results = {
         'hazard_ratio_results': hr_results,
@@ -1004,211 +1036,7 @@ def simple_treatment_analysis(gp_scripts, true_statins, processed_ids, thetas, s
     print(f"Control events: {control_events}")
     print(f"Total events: {total_events}")
     
-    # COMPREHENSIVE VERIFICATION
-    print("\n=== COMPREHENSIVE VERIFICATION ===")
-    
-    # 1. Check for statin contamination in final matched control group
-    print("1. Final statin contamination check...")
-    final_control_statin_check = 0
-    for _, j in matched_pairs:
-        control_eid = kept_control_eids[j]
-        if control_eid in true_statins:
-            final_control_statin_check += 1
-            print(f"   CRITICAL: Matched control {control_eid} has statin prescription!")
-    
-    if final_control_statin_check > 0:
-        print(f"   ❌ CRITICAL ERROR: {final_control_statin_check} matched controls have statin prescriptions!")
-        print("   This indicates a fundamental flaw in control group definition!")
-    else:
-        print("   ✅ No statin contamination in final matched control group")
-    
-    # 2. Check for pre-treatment/enrollment events in final matched groups
-    print("2. Final pre-index event check...")
-    if Y is not None and event_indices is not None:
-        treated_pre_events_final = 0
-        control_pre_events_final = 0
-        treated_1yr_events_final = 0
-        control_1yr_events_final = 0
-        
-        # Check treated patients
-        for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
-            y_idx = np.where(processed_ids == int(eid))[0][0]
-            pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
-            if hasattr(pre_treatment_events, 'detach'):
-                pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
-            if np.any(pre_treatment_events > 0):
-                treated_pre_events_final += 1
-            
-            # Check events within 1 year after treatment
-            post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
-            if hasattr(post_treatment_1yr, 'detach'):
-                post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
-            if np.any(post_treatment_1yr > 0):
-                treated_1yr_events_final += 1
-        
-        # Check control patients
-        for _, j in matched_pairs:
-            control_eid = kept_control_eids[j]
-            control_t0 = control_t0s[control_eids.index(control_eid)]
-            y_idx = np.where(processed_ids == int(control_eid))[0][0]
-            pre_enrollment_events = Y[y_idx, event_indices, :control_t0]
-            if hasattr(pre_enrollment_events, 'detach'):
-                pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
-            if np.any(pre_enrollment_events > 0):
-                control_pre_events_final += 1
-            
-            # Check events within 1 year after enrollment
-            post_enrollment_1yr = Y[y_idx, event_indices, control_t0:min(control_t0 + 1, Y.shape[2])]
-            if hasattr(post_enrollment_1yr, 'detach'):
-                post_enrollment_1yr = post_enrollment_1yr.detach().cpu().numpy()
-            if np.any(post_enrollment_1yr > 0):
-                control_1yr_events_final += 1
-        
-        print(f"   Treated patients with pre-treatment events: {treated_pre_events_final}")
-        print(f"   Control patients with pre-enrollment events: {control_pre_events_final}")
-        print(f"   Treated patients with events within 1 year: {treated_1yr_events_final}")
-        print(f"   Control patients with events within 1 year: {control_1yr_events_final}")
-        
-        if treated_pre_events_final > 0 or control_pre_events_final > 0:
-            print("   ❌ FAILED: Pre-index events found in final matched groups!")
-        else:
-            print("   ✅ PASSED: No pre-index events in final matched groups")
-            
-        if treated_1yr_events_final > 0 or control_1yr_events_final > 0:
-            print("   ❌ FAILED: Events within 1 year found in final matched groups!")
-        else:
-            print("   ✅ PASSED: No events within 1 year in final matched groups")
-    
-    # 3. Check CAD exclusion
-    print("3. CAD exclusion verification...")
-    cad_exclusion_failed = 0
-    for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
-        if eid in true_statins:
-            treatment_age = 30 + treatment_time
-            cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
-            cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
-            if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
-                if cad_censor_age < treatment_age:
-                    cad_exclusion_failed += 1
-    
-    for _, j in matched_pairs:
-        control_eid = kept_control_eids[j]
-        control_t0 = control_t0s[control_eids.index(control_eid)]
-        enrollment_age = covariate_dicts['age_at_enroll'].get(int(control_eid), 57)
-        cad_any = covariate_dicts.get('Cad_Any', {}).get(int(control_eid), 0)
-        cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(control_eid))
-        if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
-            if cad_censor_age < enrollment_age:
-                cad_exclusion_failed += 1
-    
-    if cad_exclusion_failed > 0:
-        print(f"   ❌ FAILED: {cad_exclusion_failed} patients with CAD before index date!")
-    else:
-        print(f"   ✅ PASSED: All patients properly excluded for CAD before index date")
-    
-  
-                              # 4. Overall verification
-    print("4. Overall verification...")
-    verification_passed = (final_control_statin_check == 0 and 
-                          (Y is None or event_indices is None or 
-                           (treated_pre_events_final == 0 and control_pre_events_final == 0 and
-                            treated_1yr_events_final == 0 and control_1yr_events_final == 0)) and
-                          cad_exclusion_failed == 0)
-    
-    if verification_passed:
-        print("   ✅ ALL VERIFICATION CHECKS PASSED")
-    else:
-        print("   ❌ VERIFICATION FAILED - investigate issues above")
-    
-    # 5. Check for duplications in cases or controls
-    print("5. Duplication check...")
-    treated_duplicates = len(matched_treated_eids) - len(set(matched_treated_eids))
-    control_eids_matched = [kept_control_eids[j] for _, j in matched_pairs]
-    control_duplicates = len(control_eids_matched) - len(set(control_eids_matched))
-    
-    if treated_duplicates > 0:
-        print(f"   ❌ FAILED: {treated_duplicates} duplicate treated patients!")
-        # Show the duplicates
-        from collections import Counter
-        treated_counts = Counter(matched_treated_eids)
-        duplicates = [eid for eid, count in treated_counts.items() if count > 1]
-        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
-    else:
-        print("   ✅ PASSED: No duplicate treated patients")
-        
-    if control_duplicates > 0:
-        print(f"   ❌ FAILED: {control_duplicates} duplicate control patients!")
-        # Show the duplicates
-        control_counts = Counter(control_eids_matched)
-        duplicates = [eid for eid, count in control_counts.items() if count > 1]
-        print(f"      Duplicate EIDs: {duplicates[:10]}...")  # Show first 10
-    else:
-        print("   ✅ PASSED: No duplicate control patients")
-    
-    # 6. Global/Local ID alignment verification
-    print("6. Global/Local ID alignment verification...")
-    id_alignment_errors = 0
-    
-    # Check treated patients
-    for i, (eid, treatment_time) in enumerate(zip(matched_treated_eids, matched_treatment_times)):
-        # Verify global ID matches processed_ids
-        try:
-            global_idx = np.where(processed_ids == int(eid))[0][0]
-        except IndexError:
-            print(f"   ❌ ERROR: Treated patient {eid} not found in processed_ids")
-            id_alignment_errors += 1
-            continue
-            
-        # Verify covariate data exists for this global ID
-        if int(eid) not in covariate_dicts['age_at_enroll']:
-            print(f"   ❌ ERROR: Treated patient {eid} missing age data")
-            id_alignment_errors += 1
-            continue
-            
-        if int(eid) not in covariate_dicts['sex']:
-            print(f"   ❌ ERROR: Treated patient {eid} missing sex data")
-            id_alignment_errors += 1
-            continue
-    
-    # Check control patients
-    for _, j in matched_pairs:
-        control_eid = kept_control_eids[j]
-        
-        # Verify global ID matches processed_ids
-        try:
-            global_idx = np.where(processed_ids == int(control_eid))[0][0]
-        except IndexError:
-            print(f"   ❌ ERROR: Control patient {control_eid} not found in processed_ids")
-            id_alignment_errors += 1
-            continue
-            
-        # Verify covariate data exists for this global ID
-        if int(control_eid) not in covariate_dicts['age_at_enroll']:
-            print(f"   ❌ ERROR: Control patient {control_eid} missing age data")
-            id_alignment_errors += 1
-            continue
-            
-        if int(control_eid) not in covariate_dicts['sex']:
-            print(f"   ❌ ERROR: Control patient {control_eid} missing sex data")
-            id_alignment_errors += 1
-            continue
-    
-    if id_alignment_errors == 0:
-        print("   ✅ PASSED: All global/local ID alignments verified")
-        print("   ✅ All matched patients have corresponding covariate data")
-    else:
-        print(f"   ❌ FAILED: {id_alignment_errors} ID alignment errors found")
-    
-    # Update overall verification
-    verification_passed = (verification_passed and 
-                          treated_duplicates == 0 and 
-                          control_duplicates == 0 and 
-                          id_alignment_errors == 0)
-    
-    if verification_passed:
-        print("\n   🎉 ALL VERIFICATION CHECKS PASSED - ANALYSIS IS CLEAN!")
-    else:
-        print("\n   ⚠️ VERIFICATION FAILED - investigate issues above")
+
     
     return results
     
