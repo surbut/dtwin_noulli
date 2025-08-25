@@ -772,49 +772,78 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             print(f"\nTreated patients with events: {len(treated_event_times):,}")
             print(f"Control patients with events: {len(control_event_times):,}")
             
-            # DEMOGRAPHIC SUMMARY OF MATCHED COHORTS
-            print(f"\n=== DEMOGRAPHIC CHARACTERISTICS OF MATCHED COHORTS ===")
+            # COMPREHENSIVE COVARIATE SUMMARY TABLE
+            print(f"\n=== COVARIATE SUMMARY TABLE FOR MATCHED COHORTS ===")
             
-            # Collect demographics for matched patients
-            treated_ages = []
-            treated_sexes = []
-            control_ages = []
-            control_sexes = []
+            # Collect all covariates for matched patients
+            covariate_data = {
+                'age_at_enroll': [], 'sex': [], 'dm2_prev': [], 'antihtnbase': [], 'dm1_prev': [],
+                'ldl_prs': [], 'cad_prs': [], 'tchol': [], 'hdl': [], 'SBP': [], 'pce_goff': [],
+                'smoke': [], 'Dm_Any': [], 'Ht_Any': [], 'HyperLip_Any': []
+            }
             
-            # Get treated demographics
+            # Collect treated covariates
             for treated_idx in matched_treated_indices:
                 treated_eid = processed_ids[treated_idx]
-                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(treated_eid))
-                sex = covariate_dicts['sex'].get(int(treated_eid))
-                if age_at_enroll is not None and not np.isnan(age_at_enroll):
-                    treated_ages.append(age_at_enroll)
-                if sex is not None and not np.isnan(sex):
-                    treated_sexes.append(int(sex))
+                for cov_name in covariate_data.keys():
+                    value = covariate_dicts.get(cov_name, {}).get(int(treated_eid))
+                    covariate_data[cov_name].append(value)
             
-            # Get control demographics  
+            # Collect control covariates
             for control_idx in matched_control_indices:
                 control_eid = processed_ids[control_idx]
-                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
-                sex = covariate_dicts['sex'].get(int(control_eid))
-                if age_at_enroll is not None and not np.isnan(age_at_enroll):
-                    control_ages.append(age_at_enroll)
-                if sex is not None and not np.isnan(sex):
-                    control_sexes.append(int(sex))
+                for cov_name in covariate_data.keys():
+                    value = covariate_dicts.get(cov_name, {}).get(int(control_eid))
+                    covariate_data[cov_name].append(value)
             
-            # Calculate statistics
-            if treated_ages and control_ages:
-                print(f"Age at Enrollment:")
-                print(f"  Treated:  Mean={np.mean(treated_ages):.1f}, Median={np.median(treated_ages):.1f}, Range={min(treated_ages):.1f}-{max(treated_ages):.1f}")
-                print(f"  Control:  Mean={np.mean(control_ages):.1f}, Median={np.median(control_ages):.1f}, Range={min(control_ages):.1f}-{max(control_ages):.1f}")
-                print(f"  Difference: {np.mean(treated_ages) - np.mean(control_ages):.1f} years")
+            # Create summary table
+            print(f"{'Variable':<20} {'Treated (n=' + str(len(matched_treated_indices)) + ')':<25} {'Control (n=' + str(len(matched_control_indices)) + ')':<25} {'Difference':<15}")
+            print("-" * 85)
             
-            if treated_sexes and control_sexes:
-                treated_male_pct = np.mean(treated_sexes) * 100
-                control_male_pct = np.mean(control_sexes) * 100
-                print(f"\nSex Distribution:")
-                print(f"  Treated:  {treated_male_pct:.1f}% male, {100-treated_male_pct:.1f}% female")
-                print(f"  Control:  {control_male_pct:.1f}% male, {100-control_male_pct:.1f}% female")
-                print(f"  Difference: {treated_male_pct - control_male_pct:.1f} percentage points")
+            # Age
+            treated_age_mean = np.mean([x for x in covariate_data['age_at_enroll'][:len(matched_treated_indices)] if x is not None and not np.isnan(x)])
+            control_age_mean = np.mean([x for x in covariate_data['age_at_enroll'][len(matched_treated_indices):] if x is not None and not np.isnan(x)])
+            age_diff = treated_age_mean - control_age_mean
+            print(f"{'Age (years)':<20} {treated_age_mean:<25.1f} {control_age_mean:<25.1f} {age_diff:<15.1f}")
+            
+            # Sex (% male)
+            treated_sex_pct = np.mean([x for x in covariate_data['sex'][:len(matched_treated_indices)] if x is not None and not np.isnan(x)]) * 100
+            control_sex_pct = np.mean([x for x in covariate_data['sex'][len(matched_treated_indices):] if x is not None and not np.isnan(x)]) * 100
+            sex_diff = treated_sex_pct - control_sex_pct
+            print(f"{'Sex (% male)':<20} {treated_sex_pct:<25.1f} {control_sex_pct:<25.1f} {sex_diff:<15.1f}")
+            
+            # Binary variables (proportions)
+            binary_vars = ['dm2_prev', 'antihtnbase', 'dm1_prev', 'Dm_Any', 'Ht_Any', 'HyperLip_Any']
+            for var in binary_vars:
+                treated_pct = np.mean([x for x in covariate_data[var][:len(matched_treated_indices)] if x is not None and not np.isnan(x)]) * 100
+                control_pct = np.mean([x for x in covariate_data[var][len(matched_treated_indices):] if x is not None and not np.isnan(x)]) * 100
+                pct_diff = treated_pct - control_pct
+                print(f"{var:<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+            
+            # Continuous variables (means)
+            continuous_vars = ['ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff']
+            for var in continuous_vars:
+                treated_mean = np.mean([x for x in covariate_data[var][:len(matched_treated_indices)] if x is not None and not np.isnan(x)])
+                control_mean = np.mean([x for x in covariate_data[var][len(matched_treated_indices):] if x is not None and not np.isnan(x)])
+                mean_diff = treated_mean - control_mean
+                print(f"{var:<20} {treated_mean:<25.1f} {control_mean:<25.1f} {mean_diff:<15.1f}")
+            
+            # Smoking (proportions for each category)
+            # Handle smoking as categorical variable (0=Never, 1=Previous, 2=Current)
+            smoke_categories = ['Never', 'Previous', 'Current']
+            for i, category in enumerate(smoke_categories):
+                # Count occurrences of each smoking category
+                treated_count = sum([1 for x in covariate_data['smoke'][:len(matched_treated_indices)] if x is not None and not np.isnan(x) and x == i])
+                control_count = sum([1 for x in covariate_data['smoke'][len(matched_treated_indices):] if x is not None and not np.isnan(x) and x == i])
+                
+                treated_pct = (treated_count / len(matched_treated_indices)) * 100
+                control_pct = (control_count / len(matched_control_indices)) * 100
+                pct_diff = treated_pct - control_pct
+                print(f"{'smoke_' + category.lower():<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+            
+            print("-" * 85)
+            print("Note: Proportions shown as percentages, continuous variables as means")
+            print("Positive differences indicate treated > control")
             
             # Event timing statistics
             treated_event_mean = np.mean(treated_event_times)
