@@ -65,6 +65,10 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         sig_indices = list(range(n_signatures))
     expected_length = len(sig_indices) * window
     
+    # Debug counters for exclusions
+    excluded_pre_treatment = 0
+    excluded_post_treatment_1yr = 0
+    
     # Calculate means for imputation
     ldl_values = [v for v in covariate_dicts.get('ldl_prs', {}).values() if v is not None and not np.isnan(v)]
     hdl_values = [v for v in covariate_dicts.get('hdl', {}).values() if v is not None and not np.isnan(v)]
@@ -115,6 +119,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     if hasattr(pre_treatment_events, 'detach'):
                         pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
                     if np.any(pre_treatment_events > 0):
+                        excluded_pre_treatment += 1
                         continue  # Skip - had events before treatment
                     
                     # CRITICAL: Also exclude events within 1 year AFTER treatment (reverse causation)
@@ -122,6 +127,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     if hasattr(post_treatment_1yr, 'detach'):
                         post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
                     if np.any(post_treatment_1yr > 0):
+                        excluded_post_treatment_1yr += 1
                         continue  # Skip - had events within 1 year of treatment
             else:
                 # For control patients: no need to exclude pre-enrollment events
@@ -243,6 +249,14 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         kept_eids.append(eid)
     
     print(f"Final result: {len(features)} patients kept out of {len(eids)}")
+    
+    # Debug summary for treated patients
+    if is_treated and Y is not None and event_indices is not None:
+        print(f"=== EXCLUSION SUMMARY FOR TREATED PATIENTS ===")
+        print(f"Excluded due to pre-treatment events: {excluded_pre_treatment}")
+        print(f"Excluded due to events within 1 year post-treatment: {excluded_post_treatment_1yr}")
+        print(f"Total excluded due to events: {excluded_pre_treatment + excluded_post_treatment_1yr}")
+        print(f"Patients kept after event exclusions: {len(features)}")
     
     if len(features) == 0:
         print("Warning: No valid features found after filtering")
@@ -700,6 +714,39 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         print("\n=== EVENT TIMING ANALYSIS ===")
         print("This will help explain why HR might be protective even with higher event rates")
         
+        # VERIFY: Check that no treated patients have events in first year
+        print(f"\n=== VERIFYING 1-YEAR EXCLUSION ===")
+        first_year_events_count = 0
+        for treated_idx in matched_treated_indices:
+            treated_eid = processed_ids[treated_idx]
+            treatment_time = None
+            
+            # Find treatment time from the original treated times
+            for i, eid in enumerate(treated_eids):
+                if eid == treated_eid:
+                    treatment_time = treated_times[i]
+                    break
+            
+            if treatment_time is not None and treated_idx < Y_np.shape[0]:
+                # Check for events in first year after treatment
+                if event_indices is not None:
+                    first_year_events = Y_np[treated_idx, event_indices, int(treatment_time):min(int(treatment_time) + 1, Y_np.shape[2])]
+                else:
+                    first_year_events = Y_np[treated_idx, :, int(treatment_time):min(int(treatment_time) + 1, Y_np.shape[2])]
+                
+                # Convert PyTorch tensor to NumPy if needed
+                if hasattr(first_year_events, 'detach'):
+                    first_year_events = first_year_events.detach().cpu().numpy()
+                
+                if np.any(first_year_events > 0):
+                    first_year_events_count += 1
+                    print(f"⚠️ WARNING: Treated patient {treated_eid} has events in first year after treatment!")
+        
+        if first_year_events_count == 0:
+            print("✅ SUCCESS: No treated patients have events in first year after treatment")
+        else:
+            print(f"❌ ERROR: {first_year_events_count} treated patients have events in first year after treatment")
+        
         # Debug control t0 issues
         print(f"\n=== CONTROL T0 ANALYSIS ===")
         print(f"Total control patients processed: {len(control_t0_debug)}")
@@ -726,6 +773,50 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         if len(treated_event_times) > 0 and len(control_event_times) > 0:
             print(f"\nTreated patients with events: {len(treated_event_times):,}")
             print(f"Control patients with events: {len(control_event_times):,}")
+            
+            # DEMOGRAPHIC SUMMARY OF MATCHED COHORTS
+            print(f"\n=== DEMOGRAPHIC CHARACTERISTICS OF MATCHED COHORTS ===")
+            
+            # Collect demographics for matched patients
+            treated_ages = []
+            treated_sexes = []
+            control_ages = []
+            control_sexes = []
+            
+            # Get treated demographics
+            for treated_idx in matched_treated_indices:
+                treated_eid = processed_ids[treated_idx]
+                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(treated_eid))
+                sex = covariate_dicts['sex'].get(int(treated_eid))
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    treated_ages.append(age_at_enroll)
+                if sex is not None and not np.isnan(sex):
+                    treated_sexes.append(int(sex))
+            
+            # Get control demographics  
+            for control_idx in matched_control_indices:
+                control_eid = processed_ids[control_idx]
+                age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+                sex = covariate_dicts['sex'].get(int(control_eid))
+                if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                    control_ages.append(age_at_enroll)
+                if sex is not None and not np.isnan(sex):
+                    control_sexes.append(int(sex))
+            
+            # Calculate statistics
+            if treated_ages and control_ages:
+                print(f"Age at Enrollment:")
+                print(f"  Treated:  Mean={np.mean(treated_ages):.1f}, Median={np.median(treated_ages):.1f}, Range={min(treated_ages):.1f}-{max(treated_ages):.1f}")
+                print(f"  Control:  Mean={np.mean(control_ages):.1f}, Median={np.median(control_ages):.1f}, Range={min(control_ages):.1f}-{max(control_ages):.1f}")
+                print(f"  Difference: {np.mean(treated_ages) - np.mean(control_ages):.1f} years")
+            
+            if treated_sexes and control_sexes:
+                treated_male_pct = np.mean(treated_sexes) * 100
+                control_male_pct = np.mean(control_sexes) * 100
+                print(f"\nSex Distribution:")
+                print(f"  Treated:  {treated_male_pct:.1f}% male, {100-treated_male_pct:.1f}% female")
+                print(f"  Control:  {control_male_pct:.1f}% male, {100-control_male_pct:.1f}% female")
+                print(f"  Difference: {treated_male_pct - control_male_pct:.1f} percentage points")
             
             # Event timing statistics
             treated_event_mean = np.mean(treated_event_times)
