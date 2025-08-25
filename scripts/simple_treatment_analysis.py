@@ -785,16 +785,46 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             # Collect treated covariates
             for treated_idx in matched_treated_indices:
                 treated_eid = processed_ids[treated_idx]
-                for cov_name in covariate_data.keys():
+                # handle all non-smoking covariates
+                for cov_name in ['age_at_enroll', 'sex', 'dm2_prev', 'antihtnbase', 'dm1_prev',
+                                 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff',
+                                 'Dm_Any', 'Ht_Any', 'HyperLip_Any']:
                     value = covariate_dicts.get(cov_name, {}).get(int(treated_eid))
                     covariate_data[cov_name].append(value)
+                # normalize smoking to categorical int: 0=Never,1=Previous,2=Current
+                raw_smoke = covariate_dicts.get('smoke', {}).get(int(treated_eid))
+                if isinstance(raw_smoke, str):
+                    smoke_map = {'Never': 0, 'Previous': 1, 'Current': 2}
+                    norm_smoke = smoke_map.get(raw_smoke, None)
+                elif isinstance(raw_smoke, (int, np.integer)):
+                    norm_smoke = int(raw_smoke)
+                elif isinstance(raw_smoke, float):
+                    norm_smoke = None if np.isnan(raw_smoke) else int(raw_smoke)
+                else:
+                    norm_smoke = None
+                covariate_data['smoke'].append(norm_smoke)
             
             # Collect control covariates
             for control_idx in matched_control_indices:
                 control_eid = processed_ids[control_idx]
-                for cov_name in covariate_data.keys():
+                # handle all non-smoking covariates
+                for cov_name in ['age_at_enroll', 'sex', 'dm2_prev', 'antihtnbase', 'dm1_prev',
+                                 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff',
+                                 'Dm_Any', 'Ht_Any', 'HyperLip_Any']:
                     value = covariate_dicts.get(cov_name, {}).get(int(control_eid))
                     covariate_data[cov_name].append(value)
+                # normalize smoking to categorical int
+                raw_smoke = covariate_dicts.get('smoke', {}).get(int(control_eid))
+                if isinstance(raw_smoke, str):
+                    smoke_map = {'Never': 0, 'Previous': 1, 'Current': 2}
+                    norm_smoke = smoke_map.get(raw_smoke, None)
+                elif isinstance(raw_smoke, (int, np.integer)):
+                    norm_smoke = int(raw_smoke)
+                elif isinstance(raw_smoke, float):
+                    norm_smoke = None if np.isnan(raw_smoke) else int(raw_smoke)
+                else:
+                    norm_smoke = None
+                covariate_data['smoke'].append(norm_smoke)
             
             # Create summary table
             print(f"{'Variable':<20} {'Treated (n=' + str(len(matched_treated_indices)) + ')':<25} {'Control (n=' + str(len(matched_control_indices)) + ')':<25} {'Difference':<15}")
@@ -813,12 +843,25 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             print(f"{'Sex (% male)':<20} {treated_sex_pct:<25.1f} {control_sex_pct:<25.1f} {sex_diff:<15.1f}")
             
             # Binary variables (proportions)
-            binary_vars = ['dm2_prev', 'antihtnbase', 'dm1_prev', 'Dm_Any', 'Ht_Any', 'HyperLip_Any']
+            # Handle binary variables with proper coding interpretation
+            binary_vars = ['dm2_prev', 'antihtnbase', 'dm1_prev']
             for var in binary_vars:
                 treated_pct = np.mean([x for x in covariate_data[var][:len(matched_treated_indices)] if x is not None and not np.isnan(x)]) * 100
                 control_pct = np.mean([x for x in covariate_data[var][len(matched_treated_indices):] if x is not None and not np.isnan(x)]) * 100
                 pct_diff = treated_pct - control_pct
                 print(f"{var:<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+            
+            # Handle case-control variables (1=control, 2=case) - show % cases
+            case_control_vars = ['Dm_Any', 'Ht_Any', 'HyperLip_Any']
+            for var in case_control_vars:
+                # Count cases (value = 2) and calculate percentage
+                treated_cases = sum([1 for x in covariate_data[var][:len(matched_treated_indices)] if x is not None and not np.isnan(x) and x == 2])
+                control_cases = sum([1 for x in covariate_data[var][len(matched_treated_indices):] if x is not None and not np.isnan(x) and x == 2])
+                
+                treated_pct = (treated_cases / len(matched_treated_indices)) * 100
+                control_pct = (control_cases / len(matched_control_indices)) * 100
+                pct_diff = treated_pct - control_pct
+                print(f"{var + ' (% cases)':<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
             
             # Continuous variables (means)
             continuous_vars = ['ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff']
@@ -833,8 +876,8 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             smoke_categories = ['Never', 'Previous', 'Current']
             for i, category in enumerate(smoke_categories):
                 # Count occurrences of each smoking category
-                treated_count = sum([1 for x in covariate_data['smoke'][:len(matched_treated_indices)] if x is not None and not np.isnan(x) and x == i])
-                control_count = sum([1 for x in covariate_data['smoke'][len(matched_treated_indices):] if x is not None and not np.isnan(x) and x == i])
+                treated_count = sum([1 for x in covariate_data['smoke'][:len(matched_treated_indices)] if isinstance(x, (int, np.integer)) and x == i])
+                control_count = sum([1 for x in covariate_data['smoke'][len(matched_treated_indices):] if isinstance(x, (int, np.integer)) and x == i])
                 
                 treated_pct = (treated_count / len(matched_treated_indices)) * 100
                 control_pct = (control_count / len(matched_control_indices)) * 100
