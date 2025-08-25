@@ -130,18 +130,18 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     if np.any(post_treatment_1yr > 0):
                         excluded_post_treatment_1yr += 1
                         continue  # Skip - had events within 1 year of treatment
-            #else:
+            else:
                 # For control patients: no need to exclude pre-enrollment events
                 # We just match them at enrollment age and look for events after
-               # pass
-            else:
+                pass
+           # else:
             # For control patients: check events before enrollment time
-                pre_enrollment_events = Y[y_idx, event_indices, :t0]
+                ##pre_enrollment_events = Y[y_idx, event_indices, :t0]
                 # Convert PyTorch tensor to NumPy if needed
-                if hasattr(pre_enrollment_events, 'detach'):
-                    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
-                if np.any(pre_enrollment_events > 0):
-                    excluded_pre_events += 1
+                #if hasattr(pre_enrollment_events, 'detach'):
+                #    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
+                #if np.any(pre_enrollment_events > 0):
+                #    excluded_pre_events += 1
                     continue  # Skip - h
             
         # Extract covariates with proper handling
@@ -155,7 +155,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
-                treatment_age = age_at_enroll + treatment_dates[treatment_idx]  # Convert time index to years
+                treatment_age = age_at_enroll #+ treatment_dates[treatment_idx]  # Convert time index to years
                 age = treatment_age  # Use treatment age for matching
             else:
                 age = age_at_enroll
