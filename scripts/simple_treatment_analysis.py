@@ -35,7 +35,7 @@ def encode_smoking(status):
         return [0, 0, 0]  # For missing/unknown
 
 def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indices=None, 
-                  is_treated=False, treatment_dates=None):
+                  is_treated=False, treatment_dates=None, Y=None, event_indices=None):
     """
     Build feature vectors for matching with proper exclusions and imputation
     
@@ -48,6 +48,8 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
     - sig_indices: Optional list of signature indices to use
     - is_treated: Whether these are treated patients
     - treatment_dates: Treatment dates for treated patients
+    - Y: Optional outcome tensor for pre-treatment event exclusion
+    - event_indices: Optional list of event indices for exclusion
     
     Returns:
     - features: Feature matrix for matching
@@ -98,6 +100,34 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         if np.any(np.isnan(sig_traj)):
             continue  # Skip if signature has NaN values
         
+        # NEW: Check for ASCVD events before index date (if Y is available)
+        if Y is not None and event_indices is not None:
+            # Find this patient in Y tensor
+            y_idx = np.where(processed_ids == int(eid))[0][0]
+            
+            if is_treated and treatment_dates is not None:
+                # For treated patients: check events before treatment time
+                treatment_idx = eids.index(eid) if eid in eids else None
+                if treatment_idx is not None and treatment_idx < len(treatment_dates):
+                    treatment_time = int(treatment_dates[treatment_idx])
+                    pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
+                    # Convert PyTorch tensor to NumPy if needed
+                    if hasattr(pre_treatment_events, 'detach'):
+                        pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
+                    if np.any(pre_treatment_events > 0):
+                        continue  # Skip - had events before treatment
+                    
+                    # CRITICAL: Also exclude events within 1 year AFTER treatment (reverse causation)
+                    post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
+                    if hasattr(post_treatment_1yr, 'detach'):
+                        post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
+                    if np.any(post_treatment_1yr > 0):
+                        continue  # Skip - had events within 1 year of treatment
+            else:
+                # For control patients: no need to exclude pre-enrollment events
+                # We just match them at enrollment age and look for events after
+                pass
+        
         # Extract covariates with proper handling
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         if np.isnan(age_at_enroll) or age_at_enroll is None:
@@ -134,43 +164,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         dm1 = covariate_dicts['dm1_prev'].get(int(eid))
         if dm1 is None or np.isnan(dm1):
             continue  # Skip this patient
-
-
-
-         if Y is not None and event_indices is not None:
-            # Find this patient in Y tensor
-            y_idx = np.where(processed_ids == int(eid))[0][0]
-            
-            if is_treated and treatment_dates is not None:
-                # For treated patients: check events before treatment time
-                treatment_idx = eids.index(eid) if eid in eids else None
-                if treatment_idx is not None and treatment_idx < len(treatment_dates):
-                    treatment_time = int(treatment_dates[treatment_idx])
-                    pre_treatment_events = Y[y_idx, event_indices, :treatment_time]
-                    # Convert PyTorch tensor to NumPy if needed
-                    if hasattr(pre_treatment_events, 'detach'):
-                        pre_treatment_events = pre_treatment_events.detach().cpu().numpy()
-                    if np.any(pre_treatment_events > 0):
-                        excluded_pre_events += 1
-                        continue  # Skip - had events before treatment
-                    
-                    # CRITICAL: Also exclude events within 1 year AFTER treatment (reverse causation)
-                    post_treatment_1yr = Y[y_idx, event_indices, treatment_time:min(treatment_time + 1, Y.shape[2])]
-                    if hasattr(post_treatment_1yr, 'detach'):
-                        post_treatment_1yr = post_treatment_1yr.detach().cpu().numpy()
-                    if np.any(post_treatment_1yr > 0):
-                        excluded_pre_events += 1
-                        continue  # Skip - had events within 1 year of treatment
-            else:
-                # For control patients: check events before enrollment time
-                pre_enrollment_events = Y[y_idx, event_indices, :t0]
-                # Convert PyTorch tensor to NumPy if needed
-                if hasattr(pre_enrollment_events, 'detach'):
-                    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
-                if np.any(pre_enrollment_events > 0):
-                    excluded_pre_events += 1
-                    continue  # Skip - had events before enrollment
-                    
+        
         # EXCLUDE patients with CAD before treatment/enrollment (incident user logic)
         # Determine the reference age for CAD exclusion
         if is_treated and treatment_dates is not None:
@@ -178,7 +172,6 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
-                #treatment_age = age_at_enroll + treatment_dates[treatment_idx] / 12 # Convert time index to years
                 treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
@@ -188,9 +181,6 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
             reference_age = age_at_enroll
         
         # Check CAD exclusion (only exclude CAD before index date)
-
-
-        
         cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
         cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
         if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
@@ -374,223 +364,6 @@ def calculate_hazard_ratio(treated_outcomes, control_outcomes, follow_up_times):
     
     return results
 
-def assess_matching_balance(treated_features, control_features, 
-                          matched_treated_indices, matched_control_indices,
-                          covariate_names=None):
-    """
-    Assess matching balance by comparing covariate distributions before and after matching
-    
-    Parameters:
-    - treated_features: Original treated patient features
-    - control_features: Original control patient features  
-    - matched_treated_indices: Indices of matched treated patients (local indices)
-    - matched_control_indices: Indices of matched control patients (local indices)
-    - covariate_names: Optional list of covariate names for labeling
-    
-    Returns:
-    - Dictionary with balance statistics
-    """
-    
-    # Use local indices for feature arrays
-    matched_treated_features = treated_features[matched_treated_indices]
-    matched_control_features = control_features[matched_control_indices]
-    
-    # Calculate statistics for each covariate
-    n_covariates = treated_features.shape[1]
-    balance_stats = {}
-    
-    # Define meaningful covariate names based on feature structure
-    # Features are: [signatures (10 years * n_sigs), age, sex, dm2, antihtn, dm1, ldl_prs, cad_prs, tchol, hdl, sbp, pce_goff, smoke_never, smoke_prev, smoke_current]
-    if covariate_names is None:
-        # Calculate signature count from feature dimension
-        n_signatures = (n_covariates - 15) // 10  # 15 clinical covariates, 10 years per signature
-        
-        covariate_names = []
-        
-        # Add signature names
-        for sig_idx in range(n_signatures):
-            for year in range(10):
-                covariate_names.append(f"Signature_{sig_idx}_Year_{year}")
-        
-        # Add clinical covariate names
-        clinical_names = [
-            "Age", "Sex", "DM2_Prev", "AntiHTN_Base", "DM1_Prev",
-            "LDL_PRS", "CAD_PRS", "Total_Cholesterol", "HDL", "SBP",
-            "PCE_Goff", "Smoke_Never", "Smoke_Previous", "Smoke_Current"
-        ]
-        covariate_names.extend(clinical_names)
-    
-    for i in range(n_covariates):
-        # Before matching
-        treated_before = treated_features[:, i]
-        control_before = control_features[:, i]
-        
-        # After matching
-        treated_after = matched_treated_features[:, i]
-        control_after = matched_control_features[:, i]
-        
-        # Calculate standardized differences
-        def standardized_difference(group1, group2):
-            mean_diff = np.mean(group1) - np.mean(group2)
-            pooled_std = np.sqrt((np.var(group1) + np.var(group2)) / 2)
-            return mean_diff / pooled_std if pooled_std > 0 else 0
-        
-        # Calculate SEM (standard error of the mean)
-        def sem(group):
-            return np.std(group) / np.sqrt(len(group))
-        
-        # Before matching
-        std_diff_before = standardized_difference(treated_before, control_before)
-        treated_sem_before = sem(treated_before)
-        control_sem_before = sem(control_before)
-        
-        # After matching
-        std_diff_after = standardized_difference(treated_after, control_after)
-        treated_sem_after = sem(treated_after)
-        control_sem_after = sem(control_after)
-        
-        # Store results
-        cov_name = covariate_names[i] if i < len(covariate_names) else f"Covariate_{i}"
-        balance_stats[cov_name] = {
-            'before_matching': {
-                'treated_mean': np.mean(treated_before),
-                'control_mean': np.mean(control_before),
-                'treated_sem': treated_sem_before,
-                'control_sem': control_sem_before,
-                'std_difference': std_diff_before
-            },
-            'after_matching': {
-                'treated_mean': np.mean(treated_after),
-                'control_mean': np.mean(control_after),
-                'treated_sem': treated_sem_after,
-                'control_sem': control_sem_after,
-                'std_difference': std_diff_after
-            },
-            'improvement': abs(std_diff_before) - abs(std_diff_after)
-        }
-    
-    return balance_stats
-
-def print_balance_summary(balance_stats, top_n=10):
-    """
-    Print a summary of the balance assessment
-    """
-    print("\n=== MATCHING BALANCE ASSESSMENT ===")
-    
-    # Sort by improvement (largest improvements first)
-    sorted_stats = sorted(balance_stats.items(), 
-                         key=lambda x: x[1]['improvement'], reverse=True)
-    
-    print(f"\nTop {top_n} covariates with largest balance improvements:")
-    print(f"{'Covariate':<20} {'Before':<10} {'After':<10} {'Improvement':<12}")
-    print("-" * 55)
-    
-    for i, (cov_name, stats) in enumerate(sorted_stats[:top_n]):
-        before_std = abs(stats['before_matching']['std_difference'])
-        after_std = abs(stats['after_matching']['std_difference'])
-        improvement = stats['improvement']
-        
-        print(f"{cov_name:<20} {before_std:<10.3f} {after_std:<10.3f} {improvement:<12.3f}")
-    
-    # Overall summary
-    all_improvements = [stats['improvement'] for stats in balance_stats.values()]
-    mean_improvement = np.mean(all_improvements)
-    max_improvement = max(all_improvements)
-    
-    print(f"\nOverall balance improvement:")
-    print(f"  Mean improvement: {mean_improvement:.3f}")
-    print(f"  Max improvement: {max_improvement:.3f}")
-    print(f"  Covariates with improved balance: {sum(1 for imp in all_improvements if imp > 0)}/{len(all_improvements)}")
-
-def verify_patient_cohorts(gp_scripts, true_statins, processed_ids):
-    """
-    VERIFICATION FUNCTION: Check that our patient cohorts are properly defined
-    """
-    print("=== PATIENT COHORT VERIFICATION ===")
-    
-    # Get all patients with complete data (BOTH prescription AND signature data)
-    patients_with_complete_data = set(gp_scripts['eid'].unique()).intersection(set(processed_ids))
-    all_statin_eids = set(true_statins['eid'].unique())
-    
-    # Define cohorts explicitly
-    treated_cohort = patients_with_complete_data.intersection(all_statin_eids)
-    control_cohort = patients_with_complete_data - all_statin_eids
-    
-    print(f"Patients with complete data: {len(patients_with_complete_data):,}")
-    print(f"All statin patients: {len(all_statin_eids):,}")
-    print(f"Treated cohort (complete data + statins): {len(treated_cohort):,}")
-    print(f"Control cohort (complete data - statins): {len(control_cohort):,}")
-    
-    # Verify no overlap
-    overlap = treated_cohort.intersection(control_cohort)
-    if len(overlap) > 0:
-        print(f"❌ ERROR: {len(overlap)} patients in both treated and control!")
-        return False
-    else:
-        print("✅ No overlap between treated and control cohorts")
-        return True
-
-def verify_treated_patients_actually_have_statins(treated_eids, true_statins):
-    """
-    VERIFICATION FUNCTION: Check that all claimed treated patients actually have statins
-    """
-    print("\n=== TREATED PATIENT VERIFICATION ===")
-    
-    all_statin_eids = set(true_statins['eid'].unique())
-    treated_with_statins = [eid for eid in treated_eids if eid in all_statin_eids]
-    treated_without_statins = [eid for eid in treated_eids if eid not in all_statin_eids]
-    
-    print(f"Claimed treated patients: {len(treated_eids):,}")
-    print(f"  - With statins: {len(treated_with_statins):,}")
-    print(f"  - Without statins: {len(treated_without_statins):,}")
-    
-    if len(treated_without_statins) > 0:
-        print(f"❌ ERROR: {len(treated_without_statins)} treated patients don't have statins!")
-        return False
-    else:
-        print("✅ All treated patients have statins")
-        return True
-
-def verify_controls_are_clean(control_eids, true_statins):
-    """
-    VERIFICATION FUNCTION: Check that all controls actually don't have statins
-    """
-    print("\n=== CONTROL PATIENT VERIFICATION ===")
-    
-    all_statin_eids = set(true_statins['eid'].unique())
-    controls_with_statins = [eid for eid in control_eids if eid in all_statin_eids]
-    controls_without_statins = [eid for eid in control_eids if eid not in all_statin_eids]
-    
-    print(f"Claimed control patients: {len(control_eids):,}")
-    print(f"  - With statins: {len(controls_with_statins):,}")
-    print(f"  - Without statins: {len(controls_without_statins):,}")
-    
-    if len(controls_with_statins) > 0:
-        print(f"❌ ERROR: {len(controls_with_statins)} controls have statins!")
-        return False
-    else:
-        print("✅ All controls are clean (no statins)")
-        return True
-
-def verify_matching_results(matched_treated_eids, matched_control_eids, true_statins):
-    """
-    VERIFICATION FUNCTION: Check that final matched cohorts are correct
-    """
-    print("\n=== FINAL MATCHING VERIFICATION ===")
-    
-    # Check treated
-    treated_verification = verify_treated_patients_actually_have_statins(matched_treated_eids, true_statins)
-    
-    # Check controls
-    control_verification = verify_controls_are_clean(matched_control_eids, true_statins)
-    
-    if treated_verification and control_verification:
-        print("✅ Final matching results are valid")
-        return True
-    else:
-        print("❌ Final matching results have problems")
-        return False
-
 def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=None, 
                             thetas=None, sig_indices=None, covariate_dicts=None, Y=None, event_indices=None, cov=None):
     """
@@ -624,10 +397,27 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     
     # Step 1: Verify patient cohorts are properly defined
     print("\n1. Verifying patient cohort definitions:")
-    cohort_ok = verify_patient_cohorts(gp_scripts, true_statins, processed_ids)
-    if not cohort_ok:
-        print("❌ Cohort definition failed - stopping analysis")
+    
+    # Get all patients with complete data (BOTH prescription AND signature data)
+    patients_with_complete_data = set(gp_scripts['eid'].unique()).intersection(set(processed_ids))
+    all_statin_eids = set(true_statins['eid'].unique())
+    
+    # Define cohorts explicitly
+    treated_cohort = patients_with_complete_data.intersection(all_statin_eids)
+    control_cohort = patients_with_complete_data - all_statin_eids
+    
+    print(f"Patients with complete data: {len(patients_with_complete_data):,}")
+    print(f"All statin patients: {len(all_statin_eids):,}")
+    print(f"Treated cohort (complete data + statins): {len(treated_cohort):,}")
+    print(f"Control cohort (complete data - statins): {len(control_cohort):,}")
+    
+    # Verify no overlap
+    overlap = treated_cohort.intersection(control_cohort)
+    if len(overlap) > 0:
+        print(f"❌ ERROR: {len(overlap)} patients in both treated and control!")
         return None
+    else:
+        print("✅ No overlap between treated and control cohorts")
     
     # Step 2: Extract treated patients using ObservationalTreatmentPatternLearner (SAME AS COMPREHENSIVE)
     print("\n2. Extracting treated patients using ObservationalTreatmentPatternLearner:")
@@ -649,10 +439,19 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     print(f"   Never-treated patients from learner: {len(never_treated_eids):,}")
     
     # VERIFY: Check that treated patients actually have statins
-    treated_ok = verify_treated_patients_actually_have_statins(treated_eids, true_statins)
-    if not treated_ok:
-        print("❌ Treated patient verification failed - stopping analysis")
+    treated_with_statins = [eid for eid in treated_eids if eid in all_statin_eids]
+    treated_without_statins = [eid for eid in treated_eids if eid not in all_statin_eids]
+    
+    print(f"\n=== TREATED PATIENT VERIFICATION ===")
+    print(f"Claimed treated patients: {len(treated_eids):,}")
+    print(f"  - With statins: {len(treated_with_statins):,}")
+    print(f"  - Without statins: {len(treated_without_statins):,}")
+    
+    if len(treated_without_statins) > 0:
+        print(f"❌ ERROR: {len(treated_without_statins)} treated patients don't have statins!")
         return None
+    else:
+        print("✅ All treated patients have statins")
     
     # Step 3: Define clean controls (SAME AS COMPREHENSIVE)
     print("\n3. Defining clean controls:")
@@ -670,10 +469,19 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     print(f"   Found {len(valid_never_treated)} never-treated patients with signature data")
     
     # VERIFY: Check that controls don't have statins
-    control_ok = verify_controls_are_clean(valid_never_treated, true_statins)
-    if not control_ok:
-        print("❌ Control verification failed - stopping analysis")
+    controls_with_statins = [eid for eid in valid_never_treated if eid in all_statin_eids]
+    controls_without_statins = [eid for eid in valid_never_treated if eid not in all_statin_eids]
+    
+    print(f"\n=== CONTROL PATIENT VERIFICATION ===")
+    print(f"Claimed control patients: {len(valid_never_treated):,}")
+    print(f"  - With statins: {len(controls_with_statins):,}")
+    print(f"  - Without statins: {len(controls_without_statins):,}")
+    
+    if len(controls_with_statins) > 0:
+        print(f"❌ ERROR: {len(controls_with_statins)} controls have statins!")
         return None
+    else:
+        print("✅ All controls are clean (no statins)")
     
     # Use the same control selection logic as comprehensive analysis
     control_eids_for_matching = valid_never_treated[:len(treated_eids)*2]  # 2:1 ratio
@@ -702,7 +510,8 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     # treated times is index from 30!
     treated_features, treated_indices, treated_eids_matched = build_features(
         treated_eids, treated_times, processed_ids, thetas, 
-        covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times
+        covariate_dicts, sig_indices=sig_indices, is_treated=True, treatment_dates=treated_times,
+        Y=Y, event_indices=event_indices
     )
     
     print(f"   Treated patients after exclusions: {len(treated_features):,}")
@@ -711,7 +520,8 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     print("\n5. Building features for control patients:")
     control_features, control_indices, control_eids_matched = build_features(
         valid_control_eids, control_t0s, processed_ids, 
-        thetas, covariate_dicts, sig_indices=sig_indices, is_treated=False, treatment_dates=None
+        thetas, covariate_dicts, sig_indices=sig_indices, is_treated=False, treatment_dates=None,
+        Y=Y, event_indices=event_indices
     )
     
     print(f"   Control patients after exclusions: {len(control_features):,}")
@@ -727,109 +537,17 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     print(f"   Successfully matched pairs: {len(matched_treated_indices):,}")
     
     # VERIFY: Check final matched cohorts
-    final_verification = verify_matching_results(matched_treated_eids, matched_control_eids, true_statins)
-    if not final_verification:
-        print("❌ Final matching verification failed - results may be unreliable")
+    final_treated_verification = [eid for eid in matched_treated_eids if eid in all_statin_eids]
+    final_control_verification = [eid for eid in matched_control_eids if eid not in all_statin_eids]
     
-    # Step 7: Assess matching balance
-    print("\n7. Assessing matching balance:")
-    balance_stats = assess_matching_balance(
-        treated_features, control_features, 
-        list(range(len(matched_treated_indices))),  # Local indices for matched treated
-        list(range(len(matched_control_indices)))   # Local indices for matched controls
-    )
-    print_balance_summary(balance_stats)
-    
-    # COMPREHENSIVE INDEX ALIGNMENT CHECK
-    print("\n=== INDEX ALIGNMENT VERIFICATION ===")
-    
-    # Check that matched indices correspond to the right patients
-    print("Verifying index alignment between local and global arrays...")
-    
-    # For treated patients - just check first few and last few for verification
-    treated_index_alignment_ok = True
-    sample_size = min(5, len(matched_treated_indices))
-    
-    # Check first few
-    for i in range(sample_size):
-        local_eid = matched_treated_eids[i]
-        global_eid = processed_ids[matched_treated_indices[i]]
-        if local_eid != global_eid:
-            print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
-            treated_index_alignment_ok = False
-    
-    # Check last few
-    if len(matched_treated_indices) > sample_size:
-        for i in range(len(matched_treated_indices) - sample_size, len(matched_treated_indices)):
-            local_eid = matched_treated_eids[i]
-            global_eid = processed_ids[matched_treated_indices[i]]
-            if local_eid != global_eid:
-                print(f"❌ MISALIGNMENT: Local treated[{i}]={local_eid} != Global[{matched_treated_indices[i]}]={global_eid}")
-                treated_index_alignment_ok = False
-    
-    # For control patients - same approach
-    control_index_alignment_ok = True
-    
-    # Check first few
-    for i in range(sample_size):
-        local_eid = matched_control_eids[i]
-        global_eid = processed_ids[matched_control_indices[i]]
-        if local_eid != global_eid:
-            print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
-            control_index_alignment_ok = False
-    
-    # Check last few
-    if len(matched_control_indices) > sample_size:
-        for i in range(len(matched_control_indices) - sample_size, len(matched_control_indices)):
-            local_eid = matched_control_eids[i]
-            global_eid = processed_ids[matched_control_indices[i]]
-            if local_eid != global_eid:
-                print(f"❌ MISALIGNMENT: Local control[{i}]={local_eid} != Global[{matched_control_indices[i]}]={global_eid}")
-                control_index_alignment_ok = False
-    
-    if treated_index_alignment_ok and control_index_alignment_ok:
-        print(f"✅ All indices properly aligned between local and global arrays")
-        print(f"   Verified {sample_size} samples from start and end of {len(matched_treated_indices):,} matched pairs")
+    if len(final_treated_verification) == len(matched_treated_eids) and len(final_control_verification) == len(matched_control_eids):
+        print("✅ Final matching results are valid")
     else:
-        print("❌ Index misalignment detected - this will cause incorrect results!")
+        print("❌ Final matching results have problems")
         return None
     
-    # Check that treatment times correspond to the right patients
-    print("\nVerifying treatment time alignment...")
-    treatment_time_alignment_ok = True
-    
-    # Just check a sample of treatment times
-    sample_size = min(5, len(matched_treated_eids))
-    verified_count = 0
-    
-    for i in range(sample_size):
-        treated_eid = matched_treated_eids[i]
-        # Find this patient in the original treated lists
-        original_idx = None
-        for j, eid in enumerate(treated_eids):
-            if eid == treated_eid:
-                original_idx = j
-                break
-        
-        if original_idx is not None and original_idx < len(treated_times):
-            expected_time = treated_times[original_idx]
-            verified_count += 1
-        else:
-            print(f"❌ Treated {treated_eid}: Could not find treatment time!")
-            treatment_time_alignment_ok = False
-    
-    if treatment_time_alignment_ok:
-        print(f"✅ Treatment time alignment verified for {verified_count} sample patients")
-        print(f"   Sample treatment times: {[treated_times[i] for i in range(min(3, len(treated_times)))]}")
-    else:
-        print("❌ Treatment time misalignment - stopping analysis")
-        return None
-    
-    # Now proceed with outcome calculation using PROPERLY VERIFIED indices
-    print("\n=== OUTCOME CALCULATION WITH VERIFIED INDICES ===")
-    
-    # Step 8: Calculate outcomes and hazard ratio
-    print("\n8. Calculating outcomes and hazard ratio:")
+    # Step 7: Calculate outcomes and hazard ratio
+    print("\n7. Calculating outcomes and hazard ratio:")
     
     if Y is not None:
         # Convert PyTorch tensor to numpy if needed
@@ -838,101 +556,49 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         else:
             Y_np = Y
         
-    # Extract outcomes for matched cohorts
-    treated_outcomes = []
-    control_outcomes = []
-    follow_up_times = []
+        # Extract outcomes for matched cohorts
+        treated_outcomes = []
+        control_outcomes = []
+        follow_up_times = []
 
-    # Track event timing for analysis
-    treated_event_times = []
-    control_event_times = []
-    treated_censoring_times = []
-    control_censoring_times = []
+        # Track event timing for analysis
+        treated_event_times = []
+        control_event_times = []
+        treated_censoring_times = []
+        control_censoring_times = []
 
-    # Get outcomes for treated patients
-    for treated_idx in matched_treated_indices:
-        treated_eid = processed_ids[treated_idx]
-        treatment_time = None
-        
-        # Find treatment time from the original treated times
-        for i, eid in enumerate(treated_eids):
-            if eid == treated_eid:
-                treatment_time = treated_times[i]
-                break
-        
-        if treatment_time is not None and treated_idx < Y_np.shape[0]:
-            # Look for events after treatment time
-            if event_indices is not None:
-                # Composite event - check if any of the specified events occurred
-                post_treatment_outcomes = Y_np[treated_idx, event_indices, int(treatment_time):]
-                post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
-            else:
-                # If no specific event specified, use any event
-                post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
-                post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
+        # Get outcomes for treated patients
+        for treated_idx in matched_treated_indices:
+            treated_eid = processed_ids[treated_idx]
+            treatment_time = None
             
-            # Calculate maximum available follow-up
-            max_followup = Y_np.shape[2] - int(treatment_time)
-            time_to_event_or_censor = min(5.0, max_followup)
+            # Find treatment time from the original treated times
+            for i, eid in enumerate(treated_eids):
+                if eid == treated_eid:
+                    treatment_time = treated_times[i]
+                    break
             
-            # Check if any event occurred in the full post-treatment period
-            event_occurred_anywhere = np.any(post_treatment_outcomes > 0)
-            
-            if event_occurred_anywhere:
-                # Find time to first event
-                event_times = np.where(post_treatment_outcomes > 0)[0]
-                actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
-                
-                # Check if event occurred within our follow-up window
-                if actual_event_time < time_to_event_or_censor:
-                    # Event occurred within follow-up window - count as event
-                    time_to_event = actual_event_time
-                    event_occurred = True
-                    treated_event_times.append(time_to_event)
-                else:
-                    # Event occurred after follow-up window - treat as censored
-                    time_to_event = time_to_event_or_censor
-                    event_occurred = False
-                    treated_censoring_times.append(time_to_event)
-            else:
-                # No event occurred - censored at end of available follow-up
-                time_to_event = time_to_event_or_censor
-                event_occurred = False
-                treated_censoring_times.append(time_to_event)
-            
-            treated_outcomes.append(int(event_occurred))
-            follow_up_times.append(time_to_event)
-
-    # Get outcomes for control patients
-    for control_idx in matched_control_indices:
-        control_eid = processed_ids[control_idx]
-        
-        # For controls, use their age-based time point as "treatment" time
-        age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
-        if age_at_enroll is not None and not np.isnan(age_at_enroll):
-            control_time = int(age_at_enroll - 30)  # Convert to time index
-            
-            if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
-                # Look for events after control time
+            if treatment_time is not None and treated_idx < Y_np.shape[0]:
+                # Look for events after treatment time
                 if event_indices is not None:
                     # Composite event - check if any of the specified events occurred
-                    post_control_outcomes = Y_np[control_idx, event_indices, control_time:]
-                    post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    post_treatment_outcomes = Y_np[treated_idx, event_indices, int(treatment_time):]
+                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
                 else:
                     # If no specific event specified, use any event
-                    post_control_outcomes = Y_np[control_idx, :, control_time:]
-                    post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
+                    post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
                 
                 # Calculate maximum available follow-up
-                max_followup = Y_np.shape[2] - int(control_time)
+                max_followup = Y_np.shape[2] - int(treatment_time)
                 time_to_event_or_censor = min(5.0, max_followup)
                 
-                # Check if any event occurred in the full post-control period
-                event_occurred_anywhere = np.any(post_control_outcomes > 0)
+                # Check if any event occurred in the full post-treatment period
+                event_occurred_anywhere = np.any(post_treatment_outcomes > 0)
                 
                 if event_occurred_anywhere:
                     # Find time to first event
-                    event_times = np.where(post_control_outcomes > 0)[0]
+                    event_times = np.where(post_treatment_outcomes > 0)[0]
                     actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
                     
                     # Check if event occurred within our follow-up window
@@ -940,24 +606,122 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                         # Event occurred within follow-up window - count as event
                         time_to_event = actual_event_time
                         event_occurred = True
-                        control_event_times.append(time_to_event)
+                        treated_event_times.append(time_to_event)
                     else:
                         # Event occurred after follow-up window - treat as censored
                         time_to_event = time_to_event_or_censor
                         event_occurred = False
-                        control_censoring_times.append(time_to_event)
+                        treated_censoring_times.append(time_to_event)
                 else:
                     # No event occurred - censored at end of available follow-up
                     time_to_event = time_to_event_or_censor
                     event_occurred = False
-                    control_censoring_times.append(time_to_event)
+                    treated_censoring_times.append(time_to_event)
                 
-                control_outcomes.append(int(event_occurred))
+                treated_outcomes.append(int(event_occurred))
                 follow_up_times.append(time_to_event)
+
+        # Get outcomes for control patients
+        print(f"\n=== CONTROL T0 DEBUGGING ===")
+        print(f"Processing {len(matched_control_indices)} control patients")
+        print(f"First 5 control indices: {matched_control_indices[:5]}")
+        print(f"First 5 control EIDs: {[processed_ids[i] for i in matched_control_indices[:5]]}")
+        
+        control_t0_debug = []
+        
+        for control_idx in matched_control_indices:
+            control_eid = processed_ids[control_idx]
+            
+            # For controls, use their age-based time point as "treatment" time
+            age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
+            if age_at_enroll is not None and not np.isnan(age_at_enroll):
+                control_time = int(age_at_enroll - 30)  # Convert to time index
+                
+                # Debug: Track what's happening with control t0s
+                control_t0_debug.append({
+                    'eid': control_eid,
+                    'age_at_enroll': age_at_enroll,
+                    'control_time': control_time,
+                    'valid_bounds': control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]
+                })
+                
+                if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
+                    # Look for events after control time
+                    if event_indices is not None:
+                        # Composite event - check if any of the specified events occurred
+                        post_control_outcomes = Y_np[control_idx, event_indices, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    else:
+                        # If no specific event specified, use any event
+                        post_control_outcomes = Y_np[control_idx, :, control_time:]
+                        post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
+                    
+                    # Calculate maximum available follow-up
+                    max_followup = Y_np.shape[2] - int(control_time)
+                    time_to_event_or_censor = min(5.0, max_followup)
+                    
+                    # Check if any event occurred in the full post-control period
+                    event_occurred_anywhere = np.any(post_control_outcomes > 0)
+                    
+                    if event_occurred_anywhere:
+                        # Find time to first event
+                        event_times = np.where(post_control_outcomes > 0)[0]
+                        actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                        
+                        # Check if event occurred within our follow-up window
+                        if actual_event_time < time_to_event_or_censor:
+                            # Event occurred within follow-up window - count as event
+                            time_to_event = actual_event_time
+                            event_occurred = True
+                            control_event_times.append(time_to_event)
+                        else:
+                            # Event occurred after follow-up window - treat as censored
+                            time_to_event = time_to_event_or_censor
+                            event_occurred = False
+                            control_censoring_times.append(time_to_event)
+                    else:
+                        # No event occurred - censored at end of available follow-up
+                        time_to_event = time_to_event_or_censor
+                        event_occurred = False
+                        control_censoring_times.append(time_to_event)
+                    
+                    control_outcomes.append(int(event_occurred))
+                    follow_up_times.append(time_to_event)
+                else:
+                    # Control index out of bounds or control_time too large - skip
+                    print(f"Warning: Control {control_eid} has invalid index or time bounds")
+                    continue
+            else:
+                # Control patient doesn't have valid age data - skip
+                print(f"Warning: Control {control_eid} missing age data")
+                continue
         
         # ANALYZE EVENT TIMING DISTRIBUTIONS
         print("\n=== EVENT TIMING ANALYSIS ===")
         print("This will help explain why HR might be protective even with higher event rates")
+        
+        # Debug control t0 issues
+        print(f"\n=== CONTROL T0 ANALYSIS ===")
+        print(f"Total control patients processed: {len(control_t0_debug)}")
+        if control_t0_debug:
+            ages = [d['age_at_enroll'] for d in control_t0_debug]
+            times = [d['control_time'] for d in control_t0_debug]
+            valid_bounds = [d['valid_bounds'] for d in control_t0_debug]
+            
+            print(f"Age range: {min(ages):.1f} to {max(ages):.1f}")
+            print(f"Control time range: {min(times)} to {max(times)}")
+            print(f"Valid bounds: {sum(valid_bounds)}/{len(valid_bounds)}")
+            
+            # Show some examples
+            print(f"\nFirst 5 control t0s:")
+            for i, debug_info in enumerate(control_t0_debug[:5]):
+                print(f"  {i}: EID {debug_info['eid']}, Age {debug_info['age_at_enroll']:.1f}, Time {debug_info['control_time']}, Valid {debug_info['valid_bounds']}")
+        
+        print(f"\nDebug: Treated outcomes collected: {len(treated_outcomes)}")
+        print(f"Debug: Control outcomes collected: {len(control_outcomes)}")
+        print(f"Debug: Follow-up times collected: {len(follow_up_times)}")
+        print(f"Debug: Treated event times: {len(treated_event_times)}")
+        print(f"Debug: Control event times: {len(control_event_times)}")
         
         if len(treated_event_times) > 0 and len(control_event_times) > 0:
             print(f"\nTreated patients with events: {len(treated_event_times):,}")
@@ -1076,8 +840,7 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                     'treated_features': treated_features,
                     'control_features': control_features,
                     'feature_names': ['signatures'] + ['age', 'sex', 'dm2', 'antihtn', 'dm1', 'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'sbp', 'pce_goff', 'smoke_never', 'smoke_previous', 'smoke_current']
-                },
-                'balance_stats': balance_stats
+                }
             }
             
             return comprehensive_results
@@ -1087,101 +850,3 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     else:
         print("   No outcomes (Y) found - cannot calculate HR")
         return None
-
-def check_comprehensive_controls_contamination(results, true_statins):
-    """
-    Check if the matched controls from comprehensive analysis were contaminated
-    
-    Parameters:
-    - results: Results from comprehensive analysis (ctp_dl)
-    - true_statins: DataFrame with statin prescriptions
-    
-    Returns:
-    - Dictionary with contamination check results
-    """
-    print("=== CHECKING COMPREHENSIVE ANALYSIS CONTROLS ===")
-    
-    # Get matched control indices from comprehensive analysis
-    matched_control_indices = results['matched_control_indices']
-    
-    # Get all treated EIDs
-    all_treated_eids = set(true_statins['eid'].unique())
-    
-    # Get control EIDs from the comprehensive analysis
-    # We need to convert indices back to EIDs
-    
-    # Extract control EIDs from the comprehensive analysis results
-    # This assumes the results contain the processed_ids
-    if 'enhanced_learner' in results:
-        processed_ids = results['enhanced_learner'].processed_ids
-        matched_control_eids = [processed_ids[i] for i in matched_control_indices]
-        
-        # Check for contamination
-        contaminated_controls = []
-        for eid in matched_control_eids:
-            if eid in all_treated_eids:
-                contaminated_controls.append(eid)
-        
-        print(f"Comprehensive controls: {len(matched_control_eids):,}")
-        print(f"Controls who actually have statins: {len(contaminated_controls):,}")
-        
-        if len(contaminated_controls) > 0:
-            print(f"⚠️ PROBLEM: These controls should NOT have statins!")
-            print(f"Sample problematic controls: {contaminated_controls[:5]}")
-        else:
-            print(f"✅ All comprehensive controls are truly untreated")
-        
-        # Calculate contamination rate
-        contamination_rate = len(contaminated_controls) / len(matched_control_eids) * 100
-        print(f"Contamination rate: {contamination_rate:.1f}%")
-        
-        return {
-            'total_controls': len(matched_control_eids),
-            'contaminated_controls': len(contaminated_controls),
-            'contamination_rate': contamination_rate,
-            'contaminated_eids': contaminated_controls
-        }
-    else:
-        print("Could not extract control information from results")
-        return None
-
-# Run the analysis
-if __name__ == "__main__":
-    # For standalone execution, these would need to be loaded
-    results = simple_treatment_analysis()
-    
-    if results is not None:
-        print("\n=== COMPREHENSIVE RESULTS SUMMARY ===")
-        print(f"Matched pairs: {results['cohort_sizes']['n_treated']:,}")
-        print(f"Total patients: {results['cohort_sizes']['n_total']:,}")
-        
-        hr_results = results['hazard_ratio_results']
-        print(f"Hazard Ratio: {hr_results['hazard_ratio']:.3f}")
-        print(f"95% CI: {hr_results['hr_ci_lower']:.3f} - {hr_results['hr_ci_upper']:.3f}")
-        print(f"P-value: {hr_results['p_value']:.4f}")
-        
-        # Now you can access matched patients for further analysis:
-        matched_treated_eids = results['matched_patients']['treated_eids']
-        matched_control_eids = results['matched_patients']['control_eids']
-        print(f"\nMatched treated EIDs: {len(matched_treated_eids):,}")
-        print(f"Matched control EIDs: {len(matched_control_eids):,}")
-        
-        # Show treatment times
-        treated_times = results['treatment_times']['treated_times']
-        control_times = results['treatment_times']['control_times']
-        print(f"Treated times (years from enrollment): {len(treated_times):,}")
-        print(f"Control times (years from enrollment): {len(control_times):,}")
-        
-        # Show balance stats
-        balance_stats = results['balance_stats']
-        print(f"\nMatching balance assessment available")
-        
-        # Example: You can now use these for differential response analysis
-        print("\nYou can now use these matched patient IDs for:")
-        print("- Differential response analysis")
-        print("- Signature heterogeneity testing") 
-        print("- Individual treatment effect analysis")
-        print("- Subgroup analysis by signature patterns")
-        print("- Running any post-matching analysis scripts")
-    else:
-        print("Analysis failed - no results returned")
