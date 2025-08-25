@@ -379,7 +379,8 @@ def calculate_hazard_ratio(treated_outcomes, control_outcomes, follow_up_times):
     return results
 
 def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=None, 
-                            thetas=None, sig_indices=None, covariate_dicts=None, Y=None, event_indices=None, cov=None):
+                            thetas=None, sig_indices=None, covariate_dicts=None, Y=None, event_indices=None, cov=None, 
+                            restrictive_followup=True):
     """
     Simplified treatment analysis with explicit self-checking
     
@@ -574,13 +575,13 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
         treated_outcomes = []
         control_outcomes = []
         follow_up_times = []
-
+        
         # Track event timing for analysis
         treated_event_times = []
         control_event_times = []
         treated_censoring_times = []
         control_censoring_times = []
-
+        
         # Get outcomes for treated patients
         for treated_idx in matched_treated_indices:
             treated_eid = processed_ids[treated_idx]
@@ -603,46 +604,53 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                     post_treatment_outcomes = Y_np[treated_idx, :, int(treatment_time):]
                     post_treatment_outcomes = np.any(post_treatment_outcomes > 0, axis=0)
                 
-                # Calculate maximum available follow-up
-                max_followup = Y_np.shape[2] - int(treatment_time)
-                time_to_event_or_censor = min(5.0, max_followup)
-                
-                # Check if any event occurred in the full post-treatment period
-                event_occurred_anywhere = np.any(post_treatment_outcomes > 0)
-                
-                if event_occurred_anywhere:
-                    # Find time to first event
-                    event_times = np.where(post_treatment_outcomes > 0)[0]
-                    actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                if restrictive_followup:
+                    # RESTRICTIVE APPROACH: Only count events within 5-year window
+                    max_followup = Y_np.shape[2] - int(treatment_time)
+                    time_to_event_or_censor = min(5.0, max_followup)
                     
-                    # Check if event occurred within our follow-up window
-                    if actual_event_time < time_to_event_or_censor:
-                        # Event occurred within follow-up window - count as event
-                        time_to_event = actual_event_time
-                        event_occurred = True
-                        treated_event_times.append(time_to_event)
+                    # Check if any event occurred in the full post-treatment period
+                    event_occurred_anywhere = np.any(post_treatment_outcomes > 0)
+                    
+                    if event_occurred_anywhere:
+                        # Find time to first event
+                        event_times = np.where(post_treatment_outcomes > 0)[0]
+                        actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                        
+                        # Check if event occurred within our follow-up window
+                        if actual_event_time < time_to_event_or_censor:
+                            # Event occurred within follow-up window - count as event
+                            time_to_event = actual_event_time
+                            event_occurred = True
+                            treated_event_times.append(time_to_event)
+                        else:
+                            # Event occurred after follow-up window - treat as censored
+                            time_to_event = time_to_event_or_censor
+                            event_occurred = False
+                            treated_censoring_times.append(time_to_event)
                     else:
-                        # Event occurred after follow-up window - treat as censored
+                        # No event occurred - censored at end of available follow-up
                         time_to_event = time_to_event_or_censor
                         event_occurred = False
                         treated_censoring_times.append(time_to_event)
                 else:
-                    # No event occurred - censored at end of available follow-up
-                    time_to_event = time_to_event_or_censor
-                    event_occurred = False
-                    treated_censoring_times.append(time_to_event)
+                    # LIBERAL APPROACH: Count any events after treatment time
+                    event_occurred = np.any(post_treatment_outcomes > 0)
+                    
+                    if event_occurred:
+                        # Find time to first event
+                        event_times = np.where(post_treatment_outcomes > 0)[0]
+                        time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                        treated_event_times.append(time_to_event)
+                    else:
+                        # Censored at end of follow-up (minimum 5 years)
+                        time_to_event = min(5.0, Y_np.shape[2] - int(treatment_time))
+                        treated_censoring_times.append(time_to_event)
                 
                 treated_outcomes.append(int(event_occurred))
                 follow_up_times.append(time_to_event)
 
         # Get outcomes for control patients
-        print(f"\n=== CONTROL T0 DEBUGGING ===")
-        print(f"Processing {len(matched_control_indices)} control patients")
-        print(f"First 5 control indices: {matched_control_indices[:5]}")
-        print(f"First 5 control EIDs: {[processed_ids[i] for i in matched_control_indices[:5]]}")
-        
-        control_t0_debug = []
-        
         for control_idx in matched_control_indices:
             control_eid = processed_ids[control_idx]
             
@@ -650,14 +658,6 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             age_at_enroll = covariate_dicts['age_at_enroll'].get(int(control_eid))
             if age_at_enroll is not None and not np.isnan(age_at_enroll):
                 control_time = int(age_at_enroll - 30)  # Convert to time index
-                
-                # Debug: Track what's happening with control t0s
-                control_t0_debug.append({
-                    'eid': control_eid,
-                    'age_at_enroll': age_at_enroll,
-                    'control_time': control_time,
-                    'valid_bounds': control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]
-                })
                 
                 if control_idx < Y_np.shape[0] and control_time < Y_np.shape[2]:
                     # Look for events after control time
@@ -670,48 +670,58 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
                         post_control_outcomes = Y_np[control_idx, :, control_time:]
                         post_control_outcomes = np.any(post_control_outcomes > 0, axis=0)
                     
-                    # Calculate maximum available follow-up
-                    max_followup = Y_np.shape[2] - int(control_time)
-                    time_to_event_or_censor = min(5.0, max_followup)
-                    
-                    # Check if any event occurred in the full post-control period
-                    event_occurred_anywhere = np.any(post_control_outcomes > 0)
-                    
-                    if event_occurred_anywhere:
-                        # Find time to first event
-                        event_times = np.where(post_control_outcomes > 0)[0]
-                        actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                    if restrictive_followup:
+                        # RESTRICTIVE APPROACH: Only count events within 5-year window
+                        max_followup = Y_np.shape[2] - int(control_time)
+                        time_to_event_or_censor = min(5.0, max_followup)
                         
-                        # Check if event occurred within our follow-up window
-                        if actual_event_time < time_to_event_or_censor:
-                            # Event occurred within follow-up window - count as event
-                            time_to_event = actual_event_time
-                            event_occurred = True
-                            control_event_times.append(time_to_event)
+                        # Check if any event occurred in the full post-control period
+                        event_occurred_anywhere = np.any(post_control_outcomes > 0)
+                        
+                        if event_occurred_anywhere:
+                            # Find time to first event
+                            event_times = np.where(post_control_outcomes > 0)[0]
+                            actual_event_time = event_times[0] if len(event_times) > 0 else time_to_event_or_censor
+                            
+                            # Check if event occurred within our follow-up window
+                            if actual_event_time < time_to_event_or_censor:
+                                # Event occurred within follow-up window - count as event
+                                time_to_event = actual_event_time
+                                event_occurred = True
+                                control_event_times.append(time_to_event)
+                            else:
+                                # Event occurred after follow-up window - treat as censored
+                                time_to_event = time_to_event_or_censor
+                                event_occurred = False
+                                control_censoring_times.append(time_to_event)
                         else:
-                            # Event occurred after follow-up window - treat as censored
+                            # No event occurred - censored at end of available follow-up
                             time_to_event = time_to_event_or_censor
                             event_occurred = False
                             control_censoring_times.append(time_to_event)
                     else:
-                        # No event occurred - censored at end of available follow-up
-                        time_to_event = time_to_event_or_censor
-                        event_occurred = False
-                        control_censoring_times.append(time_to_event)
+                        # LIBERAL APPROACH: Count any events after control time
+                        event_occurred = np.any(post_control_outcomes > 0)
+                        
+                        if event_occurred:
+                            # Find time to first event
+                            event_times = np.where(post_control_outcomes > 0)[0]
+                            time_to_event = event_times[0] if len(event_times) > 0 else 5.0
+                            control_event_times.append(time_to_event)
+                        else:
+                            # Censored at end of follow-up (minimum 5 years)
+                            time_to_event = min(5.0, Y_np.shape[2] - control_time)
+                            control_censoring_times.append(time_to_event)
                     
                     control_outcomes.append(int(event_occurred))
                     follow_up_times.append(time_to_event)
-                else:
-                    # Control index out of bounds or control_time too large - skip
-                    print(f"Warning: Control {control_eid} has invalid index or time bounds")
-                    continue
-            else:
-                # Control patient doesn't have valid age data - skip
-                print(f"Warning: Control {control_eid} missing age data")
-                continue
         
         # ANALYZE EVENT TIMING DISTRIBUTIONS
         print("\n=== EVENT TIMING ANALYSIS ===")
+        if restrictive_followup:
+            print("Using RESTRICTIVE approach: Only count events within 5-year window (HR ≈ 1.000)")
+        else:
+            print("Using LIBERAL approach: Count any events after index time (HR ≈ 0.80)")
         print("This will help explain why HR might be protective even with higher event rates")
         
         # VERIFY: Check that no treated patients have events in first year
@@ -746,23 +756,6 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
             print("✅ SUCCESS: No treated patients have events in first year after treatment")
         else:
             print(f"❌ ERROR: {first_year_events_count} treated patients have events in first year after treatment")
-        
-        # Debug control t0 issues
-        print(f"\n=== CONTROL T0 ANALYSIS ===")
-        print(f"Total control patients processed: {len(control_t0_debug)}")
-        if control_t0_debug:
-            ages = [d['age_at_enroll'] for d in control_t0_debug]
-            times = [d['control_time'] for d in control_t0_debug]
-            valid_bounds = [d['valid_bounds'] for d in control_t0_debug]
-            
-            print(f"Age range: {min(ages):.1f} to {max(ages):.1f}")
-            print(f"Control time range: {min(times)} to {max(times)}")
-            print(f"Valid bounds: {sum(valid_bounds)}/{len(valid_bounds)}")
-            
-            # Show some examples
-            print(f"\nFirst 5 control t0s:")
-            for i, debug_info in enumerate(control_t0_debug[:5]):
-                print(f"  {i}: EID {debug_info['eid']}, Age {debug_info['age_at_enroll']:.1f}, Time {debug_info['control_time']}, Valid {debug_info['valid_bounds']}")
         
         print(f"\nDebug: Treated outcomes collected: {len(treated_outcomes)}")
         print(f"Debug: Control outcomes collected: {len(control_outcomes)}")
