@@ -67,6 +67,7 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
     
     # Debug counters for exclusions
     excluded_pre_treatment = 0
+    excluded_pre_events = 0
     excluded_post_treatment_1yr = 0
     
     # Calculate means for imputation
@@ -129,11 +130,20 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     if np.any(post_treatment_1yr > 0):
                         excluded_post_treatment_1yr += 1
                         continue  # Skip - had events within 1 year of treatment
-            else:
+            #else:
                 # For control patients: no need to exclude pre-enrollment events
                 # We just match them at enrollment age and look for events after
-                pass
-        
+               # pass
+            else:
+            # For control patients: check events before enrollment time
+                pre_enrollment_events = Y[y_idx, event_indices, :t0]
+                # Convert PyTorch tensor to NumPy if needed
+                if hasattr(pre_enrollment_events, 'detach'):
+                    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
+                if np.any(pre_enrollment_events > 0):
+                    excluded_pre_events += 1
+                    continue  # Skip - h
+            
         # Extract covariates with proper handling
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
         if np.isnan(age_at_enroll) or age_at_enroll is None:
@@ -240,6 +250,10 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         feature_vector = np.concatenate([
             sig_traj, [age, sex, dm2, antihtn, dm1, ldl_prs, cad_prs, tchol, hdl, sbp, pce_goff] + smoke
         ])
+
+        #feature_vector = np.concatenate([
+        #    sig_traj, [age, sex] + smoke
+        #])
         
         if np.any(np.isnan(feature_vector)):
             continue
