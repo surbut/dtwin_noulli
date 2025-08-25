@@ -130,19 +130,11 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
                     if np.any(post_treatment_1yr > 0):
                         excluded_post_treatment_1yr += 1
                         continue  # Skip - had events within 1 year of treatment
-            else:
-                # For control patients: no need to exclude pre-enrollment events
-                # We just match them at enrollment age and look for events after
-                pass
-           # else:
-            # For control patients: check events before enrollment time
-                ##pre_enrollment_events = Y[y_idx, event_indices, :t0]
-                # Convert PyTorch tensor to NumPy if needed
-                #if hasattr(pre_enrollment_events, 'detach'):
-                #    pre_enrollment_events = pre_enrollment_events.detach().cpu().numpy()
-                #if np.any(pre_enrollment_events > 0):
-                #    excluded_pre_events += 1
-                    continue  # Skip - h
+                else:
+                    # Treatment time not found - skip this patient
+                    continue
+            # For control patients: no need to exclude pre-enrollment events
+            # We just match them at enrollment age and look for events after
             
         # Extract covariates with proper handling
         age_at_enroll = covariate_dicts['age_at_enroll'].get(int(eid), 57)
@@ -181,27 +173,26 @@ def build_features(eids, t0s, processed_ids, thetas, covariate_dicts, sig_indice
         if dm1 is None or np.isnan(dm1):
             continue  # Skip this patient
         
-        # EXCLUDE patients with CAD before treatment/enrollment (incident user logic)
-        # Determine the reference age for CAD exclusion
+        # EXCLUDE treated patients with CAD before treatment (incident user logic)
         if is_treated and treatment_dates is not None:
             # For treated patients: use first statin prescription date
             treatment_idx = eids.index(eid) if eid in eids else None
             if treatment_idx is not None and treatment_idx < len(treatment_dates):
                 # treatment_dates[treatment_idx] is already a time index (years), not months
                 treatment_age = age_at_enroll + treatment_dates[treatment_idx] 
+                #treatment_age = 30 + treatment_dates[treatment_idx] 
                 reference_age = treatment_age
             else:
                 reference_age = age_at_enroll
-        else:
-            # For control patients: use enrollment date
-            reference_age = age_at_enroll
+            
+            # Check CAD exclusion for treated patients only
+            cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
+            cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
+            if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
+                if cad_censor_age < reference_age:
+                    continue  # Skip this treated patient
         
-        # Check CAD exclusion (only exclude CAD before index date)
-        cad_any = covariate_dicts.get('Cad_Any', {}).get(int(eid), 0)
-        cad_censor_age = covariate_dicts.get('Cad_censor_age', {}).get(int(eid))
-        if cad_any == 2 and cad_censor_age is not None and not np.isnan(cad_censor_age):
-            if cad_censor_age < reference_age:
-                continue  # Skip this patient
+        # For control patients: no CAD exclusion - they're matched at enrollment age
         
         # Check for missing DM/HTN/HyperLip status (exclude if unknown)
         dm_any = covariate_dicts.get('Dm_Any', {}).get(int(eid))
