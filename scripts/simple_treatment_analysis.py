@@ -556,6 +556,116 @@ def simple_treatment_analysis(gp_scripts=None, true_statins=None, processed_ids=
     
     print(f"   Successfully matched pairs: {len(matched_treated_indices):,}")
     
+    # COVARIATE SUMMARY BEFORE MATCHING
+    print(f"\n=== COVARIATE SUMMARY BEFORE MATCHING ===")
+    
+    # Collect covariates for all treated and control patients before matching
+    pre_match_covariate_data = {
+        'age_at_enroll': [], 'sex': [], 'dm2_prev': [], 'antihtnbase': [], 'dm1_prev': [],
+        'ldl_prs': [], 'cad_prs': [], 'tchol': [], 'hdl': [], 'SBP': [], 'pce_goff': [],
+        'smoke': [], 'Dm_Any': [], 'Ht_Any': [], 'HyperLip_Any': []
+    }
+    
+    # Collect treated covariates (all treated patients)
+    for treated_eid in treated_eids_matched:
+        for cov_name in ['age_at_enroll', 'sex', 'dm2_prev', 'antihtnbase', 'dm1_prev',
+                         'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff',
+                         'Dm_Any', 'Ht_Any', 'HyperLip_Any']:
+            value = covariate_dicts.get(cov_name, {}).get(int(treated_eid))
+            pre_match_covariate_data[cov_name].append(value)
+        # Normalize smoking
+        raw_smoke = covariate_dicts.get('smoke', {}).get(int(treated_eid))
+        if isinstance(raw_smoke, str):
+            smoke_map = {'Never': 0, 'Previous': 1, 'Current': 2}
+            norm_smoke = smoke_map.get(raw_smoke, None)
+        elif isinstance(raw_smoke, (int, np.integer)):
+            norm_smoke = int(raw_smoke)
+        elif isinstance(raw_smoke, float):
+            norm_smoke = None if np.isnan(raw_smoke) else int(raw_smoke)
+        else:
+            norm_smoke = None
+        pre_match_covariate_data['smoke'].append(norm_smoke)
+    
+    # Collect control covariates (all control patients)
+    for control_eid in control_eids_matched:
+        for cov_name in ['age_at_enroll', 'sex', 'dm2_prev', 'antihtnbase', 'dm1_prev',
+                         'ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff',
+                         'Dm_Any', 'Ht_Any', 'HyperLip_Any']:
+            value = covariate_dicts.get(cov_name, {}).get(int(control_eid))
+            pre_match_covariate_data[cov_name].append(value)
+        # Normalize smoking
+        raw_smoke = covariate_dicts.get('smoke', {}).get(int(control_eid))
+        if isinstance(raw_smoke, str):
+            smoke_map = {'Never': 0, 'Previous': 1, 'Current': 2}
+            norm_smoke = smoke_map.get(raw_smoke, None)
+        elif isinstance(raw_smoke, (int, np.integer)):
+            norm_smoke = int(raw_smoke)
+        elif isinstance(raw_smoke, float):
+            norm_smoke = None if np.isnan(raw_smoke) else int(raw_smoke)
+        else:
+            norm_smoke = None
+        pre_match_covariate_data['smoke'].append(norm_smoke)
+    
+    # Create pre-matching summary table
+    print(f"{'Variable':<20} {'Treated (n=' + str(len(treated_eids_matched)) + ')':<25} {'Control (n=' + str(len(control_eids_matched)) + ')':<25} {'Difference':<15}")
+    print("-" * 85)
+    
+    # Age
+    treated_age_mean = np.mean([x for x in pre_match_covariate_data['age_at_enroll'][:len(treated_eids_matched)] if x is not None and not np.isnan(x)])
+    control_age_mean = np.mean([x for x in pre_match_covariate_data['age_at_enroll'][len(treated_eids_matched):] if x is not None and not np.isnan(x)])
+    age_diff = treated_age_mean - control_age_mean
+    print(f"{'Age (years)':<20} {treated_age_mean:<25.1f} {control_age_mean:<25.1f} {age_diff:<15.1f}")
+    
+    # Sex (% male)
+    treated_sex_pct = np.mean([x for x in pre_match_covariate_data['sex'][:len(treated_eids_matched)] if x is not None and not np.isnan(x)]) * 100
+    control_sex_pct = np.mean([x for x in pre_match_covariate_data['sex'][len(treated_eids_matched):] if x is not None and not np.isnan(x)]) * 100
+    sex_diff = treated_sex_pct - control_sex_pct
+    print(f"{'Sex (% male)':<20} {treated_sex_pct:<25.1f} {control_sex_pct:<25.1f} {sex_diff:<15.1f}")
+    
+    # Binary variables (proportions)
+    binary_vars = ['dm2_prev', 'antihtnbase', 'dm1_prev']
+    for var in binary_vars:
+        treated_pct = np.mean([x for x in pre_match_covariate_data[var][:len(treated_eids_matched)] if x is not None and not np.isnan(x)]) * 100
+        control_pct = np.mean([x for x in pre_match_covariate_data[var][len(treated_eids_matched):] if x is not None and not np.isnan(x)]) * 100
+        pct_diff = treated_pct - control_pct
+        print(f"{var:<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+    
+    # Handle case-control variables (1=control, 2=case) - show % cases
+    case_control_vars = ['Dm_Any', 'Ht_Any', 'HyperLip_Any']
+    for var in case_control_vars:
+        # Count cases (value = 2) and calculate percentage
+        treated_cases = sum([1 for x in pre_match_covariate_data[var][:len(treated_eids_matched)] if x is not None and not np.isnan(x) and x == 2])
+        control_cases = sum([1 for x in pre_match_covariate_data[var][len(treated_eids_matched):] if x is not None and not np.isnan(x) and x == 2])
+        
+        treated_pct = (treated_cases / len(treated_eids_matched)) * 100
+        control_pct = (control_cases / len(control_eids_matched)) * 100
+        pct_diff = treated_pct - control_pct
+        print(f"{var + ' (% cases)':<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+    
+    # Continuous variables (means)
+    continuous_vars = ['ldl_prs', 'cad_prs', 'tchol', 'hdl', 'SBP', 'pce_goff']
+    for var in continuous_vars:
+        treated_mean = np.mean([x for x in pre_match_covariate_data[var][:len(treated_eids_matched)] if x is not None and not np.isnan(x)])
+        control_mean = np.mean([x for x in pre_match_covariate_data[var][len(treated_eids_matched):] if x is not None and not np.isnan(x)])
+        mean_diff = treated_mean - control_mean
+        print(f"{var:<20} {treated_mean:<25.1f} {control_mean:<25.1f} {mean_diff:<15.1f}")
+    
+    # Smoking (proportions for each category)
+    smoke_categories = ['Never', 'Previous', 'Current']
+    for i, category in enumerate(smoke_categories):
+        # Count occurrences of each smoking category
+        treated_count = sum([1 for x in pre_match_covariate_data['smoke'][:len(treated_eids_matched)] if isinstance(x, (int, np.integer)) and x == i])
+        control_count = sum([1 for x in pre_match_covariate_data['smoke'][len(treated_eids_matched):] if isinstance(x, (int, np.integer)) and x == i])
+        
+        treated_pct = (treated_count / len(treated_eids_matched)) * 100
+        control_pct = (control_count / len(control_eids_matched)) * 100
+        pct_diff = treated_pct - control_pct
+        print(f"{'smoke_' + category.lower():<20} {treated_pct:<25.1f} {control_pct:<25.1f} {pct_diff:<15.1f}")
+    
+    print("-" * 85)
+    print("Note: Pre-matching summary - shows baseline differences before matching")
+    print("Positive differences indicate treated > control")
+    
     # VERIFY: Check final matched cohorts
     final_treated_verification = [eid for eid in matched_treated_eids if eid in all_statin_eids]
     final_control_verification = [eid for eid in matched_control_eids if eid not in all_statin_eids]
